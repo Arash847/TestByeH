@@ -21,6 +21,7 @@
 
 #include <sys/types.h>
 #include <stdio.h>
+#include <string.h>
 #include <ps5/kernel.h>
 
 #include "util.h"
@@ -91,7 +92,7 @@ int main(void)
   uint64_t tbase, k_idt, k_gdt, delta;
   uint64_t idt_off, gdt_off, probe;
   uint64_t present;
-  int i, agrees, idt_ok, gdt_ok, text_readable = 0;
+  int i, agrees, idt_ok, gdt_ok, text_readable = 0, all_zero, all_ones;
   uint64_t scratch[2] = { 0, 0 };
 
   tbase = ktext_base();
@@ -162,20 +163,74 @@ int main(void)
    * enforced XOM that forces the hypervisor bypass in the first place.
    * This is the single most valuable fact for the port.
    *
-   * kread64() returns a single qword and takes only an address; kread()
-   * is the copyout primitive that reports success as 0. */
+   * NOTE: util.c kread() unconditionally returns 0, so its return value
+   * cannot indicate success. Readability must be judged from content.
+   * Unreadable text reads back as an all-zero or all-ones span; real
+   * kernel text is neither. We print the raw bytes so the result can be
+   * judged offline rather than trusting a heuristic alone. */
   probe = tbase;
-  if (kread(probe, scratch, sizeof scratch) == 0) {
-    text_readable = 1;
-    printf("[860-probe] ktext READABLE at 0x%lx: %016lx %016lx\n",
-           probe, scratch[0], scratch[1]);
-    printf("[860-probe] dump ktext from here; offline tools can do the rest.\n");
+  memset(scratch, 0, sizeof scratch);
+  (void) kread(probe, scratch, sizeof scratch);
+
+  all_zero = 1;
+  all_ones = 1;
+  for (i = 0; i < (int)(sizeof scratch / sizeof scratch[0]); i++) {
+    uint64_t w = scratch[i];
+    int b;
+    for (b = 0; b < 8; b++) {
+      uint8_t v = (uint8_t)(w >> (b * 8));
+      if (v) all_zero = 0;
+      if (v != 0xFF) all_ones = 0;
+    }
+  }
+
+  text_readable = !(all_zero || all_ones);
+
+  printf("[860-probe] ktext @0x%lx first 16 bytes:\n", probe);
+  for (i = 0; i < 16; i++)
+    printf("%s%02x", (i % 8) ? " " : "  ",
+           (unsigned int)((uint8_t *)scratch)[i]);
+  printf("\n");
+  printf("[860-probe] raw qwords: %016lx %016lx\n", scratch[0], scratch[1]);
+
+  if (text_readable) {
+    printf("[860-probe] ktext READABLE (content is neither zero nor 0xFF).\n");
+    printf("[860-probe] dump ktext from here; offline tools do the rest.\n");
+  } else if (all_zero) {
+    printf("[860-probe] ktext reads ALL ZERO -> text is not readable.\n");
   } else {
-    printf("[860-probe] ktext NOT readable at 0x%lx -> blind bootstrap needed\n",
-           probe);
+    printf("[860-probe] ktext reads ALL 0xFF -> text is not readable.\n");
   }
 
   printf("[860-probe] done, wrote nothing\n");
+
+  /* Optional capture. With -DDUMP_KTEXT_SIZE=<bytes> the probe also
+   * streams a ktext image to stdout, framed so tools/receive_dump.py
+   * from the porting guide can consume it directly:
+   *
+   *   KTDUMP1 <base> <size>\n<raw bytes>\nKTDONE1\n
+   *
+   * It is still read-only: the dump is a copyout, nothing is written. */
+#ifdef DUMP_KTEXT_SIZE
+  if (text_readable && DUMP_KTEXT_SIZE > 0) {
+    uint64_t done = 0;
+    static uint8_t chunk[0x1000];
+
+    printf("KTDUMP1 %lx %x\n", (unsigned long)probe, (unsigned int)DUMP_KTEXT_SIZE);
+    while (done < (uint64_t)DUMP_KTEXT_SIZE) {
+      uint64_t n = ((uint64_t)DUMP_KTEXT_SIZE - done) < sizeof chunk
+                     ? ((uint64_t)DUMP_KTEXT_SIZE - done) : sizeof chunk;
+      (void) kread(probe + done, chunk, n);
+      if (fwrite(chunk, 1, n, stdout) != n) {
+        printf("\n[dump] short write at 0x%lx\n", (unsigned long)done);
+        break;
+      }
+      done += n;
+    }
+    printf("\nKTDONE1\n");
+    printf("[860-probe] dump complete: 0x%lx bytes\n", (unsigned long)done);
+  }
+#endif
 
   if (agrees && idt_ok > 0 && text_readable) {
     notifyf("[8.60 probe] K=0x%lx OK\nIDT=%d/256 gates\nktext readable",
