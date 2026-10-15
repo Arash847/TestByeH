@@ -99,8 +99,34 @@
 #define KSTUFF_0860_GPR2DR_1_START    (-0xA2E97A) /* candidate DR path  */
 #define KSTUFF_0860_SWAPGS_ADD_RSP_IRET (-0xA27979)
 
-/* Single unknown that unblocks the three data-side symbols above. */
-#define KDATA_KTEXT_GAP_0860          0           /* MEASURE ON HARDWARE */
+/* K for 8.60 is now ESTABLISHED, from two independent public sources that
+ * agree exactly on every firmware branch:
+ *
+ *   ps5-payload-dev/sdk  crt/kernel.c, case 0x08600000:
+ *       KERNEL_ADDRESS_TEXT_BASE = KERNEL_ADDRESS_DATA_BASE - 0x0C70000
+ *       KERNEL_ADDRESS_ALLPROC   = KERNEL_ADDRESS_DATA_BASE + 0x2875D50
+ *
+ *   kstuff-lite 8_60.h: allproc = 0x2875D50
+ *
+ * The SDK's firmware table and kstuff-lite's anchors agree EXACTLY on all
+ * four branches that both cover, which confirms kstuff's table is
+ * kdata-relative and correctly transcribed:
+ *
+ *   FW      SDK ALLPROC   kstuff allproc   match
+ *   8.x     +0x2875D50    0x2875D50        exact
+ *   9.x     +0x2755D50    0x2755D50        exact
+ *   11.x    +0x2875D70    0x2875D70        exact
+ *   13.60   +0x28C9E80    0x28C9E80        exact
+ *
+ * CAUTION: KERNEL_ADDRESS_DATA_BASE is supplied by the EXPLOIT via
+ * payload args and the SDK checks it only for non-zero. If the running
+ * exploit reports a wrong base, every derived address is wild, and
+ * kernel_copyout() performs NO validation on the target address -- the
+ * kernel faults in kernel context and the console hard-powers-off. Any
+ * 8.60 diagnostic must sanity-check DATA_BASE before dereferencing it
+ * and must propagate kernel_copyout()'s return value.
+ */
+#define KDATA_KTEXT_GAP_0860          0x0C70000   /* CONFIRMED, two sources */
 
 /* ---- kernel symbols (ktext-relative unless noted) ------------------ */
 uint64_t g_sym_map_0860[] = {

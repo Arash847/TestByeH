@@ -26,6 +26,7 @@ endif
 
 ELF := byepervisor_reborn.elf
 PROBE_0860_ELF := byepervisor_probe_0860.elf
+STAGEA_0860_ELF := byepervisor_stageA_0860.elf
 ISSUE9_ELF := byepervisor_issue9_diag.elf
 ISSUE9_DR0_ELF := byepervisor_issue9_dr0_diag.elf
 ISSUE9_RESUME_ELF := byepervisor_issue9_resume_diag.elf
@@ -50,6 +51,17 @@ $(ELF): $(PAYLOAD_HDR) main.c kdlsym.c khook.c paging.c util.c issue9_diag.c
 $(PROBE_0860_ELF): util.c probe_0860.c kdlsym.c
 	$(CC) $(CFLAGS) -o $@ $(filter %.c,$^)
 
+# Stage A: print-only, zero kernel reads. Safe on any console and under
+# any exploit chain. Run this before anything that dereferences a kernel
+# address -- kernel_copyout() does not validate its target, so a bad
+# kdata_base_addr from the exploit faults the kernel and hard-powers-off.
+$(STAGEA_0860_ELF): util.c probe_stageA_0860.c
+	$(CC) $(CFLAGS) -o $@ $(filter %.c,$^)
+
+stageA-0860: $(STAGEA_0860_ELF)
+
+# Stage B: reads kernel memory. Only run after stageA-0860 reports a sane,
+# canonical DATA_BASE whose derived K matches the expected per-firmware K.
 probe-0860: $(PROBE_0860_ELF)
 
 issue9-diag: $(ISSUE9_ELF)

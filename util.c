@@ -9,28 +9,33 @@
 
 #include "util.h"
 
+/* NOTE: these used to unconditionally `return 0`, discarding
+ * kernel_copyout()'s status. That made every caller believe a read had
+ * succeeded, so failed reads silently yielded garbage and any structural
+ * check built on top of them was meaningless. The error must propagate:
+ * kernel_copyout() performs no validation of kaddr, so a bad address
+ * faults the kernel in kernel context and hard-powers-off the console.
+ * Callers must check, not assume. */
 int kread(uint64_t kaddr, void *dst, size_t len)
 {
-  kernel_copyout(kaddr, dst, len);
-  return 0;
+  return (int)kernel_copyout(kaddr, dst, len);
 }
 
 int kwrite(uint64_t kaddr, const void *src, size_t len)
 {
-  kernel_copyin(src, kaddr, len);
-  return 0;
+  return (int)kernel_copyin(src, kaddr, len);
 }
 
 uint32_t kread32(uint64_t kaddr)
 {
-  uint32_t v;
+  uint32_t v = 0;
   kread(kaddr, &v, sizeof(v));
   return v;
 }
 
 uint64_t kread64(uint64_t kaddr)
 {
-  uint64_t v;
+  uint64_t v = 0;
   kread(kaddr, &v, sizeof(v));
   return v;
 }
