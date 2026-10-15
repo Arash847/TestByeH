@@ -67,6 +67,8 @@ int main(void)
 {
   uint64_t dbase, k, off, addr, v = 0;
   int rc;
+  unsigned step_no = 0;
+  uint64_t last_ok = 0;
 
   printf("[stageB] alive. one qword per read, ascending, logged before read.\n");
   fflush(stdout);
@@ -111,6 +113,18 @@ int main(void)
 
     printf("ok v=0x%016lx\n", (unsigned long)v);
     fflush(stdout);
+    last_ok = off;
+
+    /* Periodic on-screen progress. A NetCat GUI does not display the
+     * stdout stream, so without this the run is invisible until it
+     * ends. Each notification names the most recent CONFIRMED-GOOD
+     * offset, so if the console powers off the last popup brackets the
+     * fatal address. */
+    step_no++;
+    if ((step_no % 8) == 0) {
+      notifyf("[stage B] scan %u\nlast good kdata+0x%lx\nnext 0x%lx",
+              step_no, (unsigned long)last_ok, (unsigned long)(off + STEP));
+    }
   }
 
   printf("[stageB] scan completed through kdata+0x%x with no failure.\n",
