@@ -1,22 +1,23 @@
-/* 8.60 port stage-0/1 diagnostic: derive K = kdata_base - ktext_base.
+/* 8.60 port stage-0 diagnostic: measure and validate K, and test whether
+ * kernel text is readable.
  *
- * READ-ONLY. This payload writes nothing to kernel memory, installs no
- * gate, touches no IST entry, does not enter rest mode, and does not
- * look at hypervisor physical memory. It is safe to run on a live 8.60
- * console.
+ * READ-ONLY. Writes nothing to kernel memory, installs no gate, touches
+ * no IST entry, does not enter rest mode, does not access hypervisor
+ * physical memory. Safe to run on a live 8.60 console.
  *
- * It measures K from two fully independent anchors -- the CPU IDT and
- * GDT descriptor-table registers -- because the porting guide requires
- * at least two independent anchors to agree before any offset is
- * believed. Both anchors are pure reads of architectural state.
+ * WHY THIS USES SDK CONSTANTS INSTEAD OF sidt/sgdt:
+ * elfldr runs each payload as a userland (ring 3) process. UMIP is
+ * enabled on this AMD part, so `sidt` and `sgdt` from ring 3 raise #GP.
+ * Because each payload runs in its own process, that fault is silent --
+ * the console shows nothing at all. An earlier revision of this probe
+ * did exactly that and produced no output. K is instead taken from the
+ * SDK's firmware-aware base constants, then validated structurally.
  *
- * Anchors (kstuff-lite 8_60.h, kdata-relative):
- *     idt       0x2EB3DF0
- *     gdt_array 0x2EB50D0
+ * K = kdata_base - ktext_base
  *
- * Also reports the SoC ID so the regular/Pro model check is recorded,
- * and probes 16 bytes of kernel text so we learn whether 8.60 still
- * has readable text (expected: yes, this predates enforced XOM).
+ * Validation is per-symbol rather than self-consistent: a wrong K makes
+ * every anchor below fail its structural check simultaneously, so a
+ * single bad constant cannot masquerade as agreement.
  */
 
 #include <sys/types.h>
@@ -27,200 +28,174 @@
 #include "util.h"
 #include "kdlsym.h"
 
-/* kstuff-lite 8_60.h, kdata-relative. Verified as kdata-rel by
- * cross-referencing the hardware-validated 11.60 tables.
+/* kstuff-lite 8_60.h, kdata-relative. Confirmed kdata-relative by
+ * cross-referencing the hardware-validated 11.60 tables, where IDT, TSS
+ * and PMAP independently all yield K = 0xD30000.
  *
- * No ULL suffixes: uint64_t is unsigned long on this target, so a ULL
- * literal would widen arithmetic expressions to unsigned long long and
- * break -Wformat against %lx. */
-#define KSTUFF_0860_IDT       0x2EB3DF0
-#define KSTUFF_0860_GDT       0x2EB50D0
-#define KSTUFF_0860_TSS_ARRAY 0x2EB6AD0
+ * No ULL suffix: uint64_t is unsigned long on this target, and a ULL
+ * literal widens arithmetic to unsigned long long, breaking -Wformat. */
+#define KSTUFF_0860_ALLPROC    0x2875D50
+#define KSTUFF_0860_IDT        0x2EB3DF0
+#define KSTUFF_0860_GDT        0x2EB50D0
+#define KSTUFF_0860_TSS_ARRAY  0x2EB6AD0
+#define KSTUFF_0860_PCPU_ARRAY 0x2EC8A00
+#define KSTUFF_0860_PMAP_STORE 0x2E48848
 
-struct idtr {
-  uint16_t limit;
-  uint64_t base;
-} __attribute__((packed));
-
-struct gdtr {
-  uint16_t limit;
-  uint64_t base;
-} __attribute__((packed));
-
-/* Read IDT/GDT registers without inline asm leaking into the payload:
- * the ps5-payload-dev SDK exposes these through the standard headers,
- * but sidt/sgdt are single-instruction reads so spelling them out keeps
- * this file buildable on any host toolchain. */
-static void read_idtr(struct idtr *r)
+/* A value that plausibly points inside the kernel's own mapping. */
+static int looks_like_kptr(uint64_t v, uint64_t tbase)
 {
-  __asm__ __volatile__("sidt %0" : "=m"(*r));
+  return v >= tbase && v < (tbase + 0x10000000UL);
 }
 
-static void read_gdtr(struct gdtr *r)
-{
-  __asm__ __volatile__("sgdt %0" : "=m"(*r));
-}
-
-static uint64_t ktext_base(void)
-{
-  return KERNEL_ADDRESS_TEXT_BASE;
-}
-
-/* An IDT entry that is present, 64-bit interrupt gate, selector 0x08,
+/* An IDT entry that is present, a 64-bit system gate, selector 0x08,
  * with the handler pointing back into kernel text. */
-static int idt_entry_plausible(uint64_t entry, uint64_t tbase)
+static int idt_entry_plausible(uint64_t e, uint64_t tbase)
 {
-  uint16_t lo = (uint16_t)(entry & 0xFFFF);
-  uint16_t sel = (uint16_t)((entry >> 16) & 0xFFFF);
-  uint64_t handler = (entry >> 32) & 0xFFFFFFFFFFFFFFFFULL;
+  uint16_t lo  = (uint16_t)(e & 0xFFFF);
+  uint16_t sel = (uint16_t)((e >> 16) & 0xFFFF);
+  uint64_t h   = e >> 32;
 
-  if (!(lo & 0x0001))                       /* not present */
-    return 0;
-  if (!(lo & 0x0E00))                       /* not a system/interrupt gate */
-    return 0;
-  if (sel != 0x08)                          /* unexpected selector */
-    return 0;
-  if (handler < tbase)                      /* handler outside kernel text */
-    return 0;
-  return 1;
+  if (!(lo & 0x0001)) return 0;   /* present */
+  if (!(lo & 0x0E00)) return 0;   /* system / interrupt gate */
+  if (sel != 0x08)   return 0;   /* kernel code selector */
+  return looks_like_kptr(h, tbase);
 }
 
 int main(void)
 {
-  struct idtr idtr;
-  struct gdtr gdtr;
-  uint64_t tbase, k_idt, k_gdt, delta;
-  uint64_t idt_off, gdt_off, probe;
-  uint64_t present;
-  int i, agrees, idt_ok, gdt_ok, text_readable = 0, all_zero, all_ones;
+  uint64_t tbase, dbase, K;
+  uint64_t idt_va, gdt_va, tss_va, pmap_va, allproc_va, pcpu_va;
+  int i, idt_ok, gdt_ok, tss_ok, pcpu_ok, pmap_ok, proc_ok;
+  int text_readable, all_zero, all_ones;
   uint64_t scratch[2] = { 0, 0 };
+  uint64_t v;
+  uint32_t passes;
 
-  tbase = ktext_base();
+  /* Print before doing anything else, so an immediate fault still leaves
+   * a marker distinguishing "payload never started" from "payload
+   * started and died later". */
+  printf("[860-probe] alive: 8.60 stage-0 diagnostic\n");
+  fflush(stdout);
 
-  printf("[860-probe] Byepervisor 8.60 stage-0 diagnostic\n");
+  tbase = (uint64_t)KERNEL_ADDRESS_TEXT_BASE;
+  dbase = (uint64_t)KERNEL_ADDRESS_DATA_BASE;
+  K    = dbase - tbase;
+
   printf("[860-probe] fw        = 0x%x\n",
          (unsigned int)(kernel_get_fw_version() & 0xffffffffU));
   printf("[860-probe] soc_id    = 0x%x\n", (unsigned int)sceKernelGetMainSocId());
-  printf("[860-probe] ktext     = 0x%lx\n", tbase);
+  printf("[860-probe] ktext     = 0x%lx\n", (unsigned long)tbase);
+  printf("[860-probe] kdata     = 0x%lx\n", (unsigned long)dbase);
+  printf("[860-probe] K         = 0x%lx\n", (unsigned long)K);
 
-  read_idtr(&idtr);
-  read_gdtr(&gdtr);
-
-  printf("[860-probe] idtr.base = 0x%lx (limit 0x%x)\n", idtr.base, idtr.limit);
-  printf("[860-probe] gdtr.base = 0x%lx (limit 0x%x)\n", gdtr.base, gdtr.limit);
-
-  /* Anchor 1: IDT. Anchor 2: GDT. Both are pure descriptor-table reads
-   * and neither depends on the other. */
-  idt_off = idtr.base - tbase;
-  gdt_off = gdtr.base - tbase;
-  k_idt = idt_off - KSTUFF_0860_IDT;
-  k_gdt = gdt_off - KSTUFF_0860_GDT;
-
-  printf("[860-probe] idt  ktext_off = 0x%lx\n", idt_off);
-  printf("[860-probe] gdt  ktext_off = 0x%lx\n", gdt_off);
-  printf("[860-probe] K(idt)        = 0x%lx\n", k_idt);
-  printf("[860-probe] K(gdt)        = 0x%lx\n", k_gdt);
-
-  delta = (k_idt > k_gdt) ? (k_idt - k_gdt) : (k_gdt - k_idt);
-  agrees = (delta == 0);
-  printf("[860-probe] anchors %s (delta 0x%lx)\n",
-         agrees ? "AGREE" : "DISAGREE -- do not trust either", delta);
-
-  if (k_idt < 0x100000 || k_idt > 0x4000000) {
-    printf("[860-probe] K out of plausible range; measurement is wrong.\n");
-    notifyf("[8.60 probe]\nK measurement failed\nIDTR=%lx GDTR=%lx",
-            idtr.base, gdtr.base);
+  if (K < 0x100000 || K > 0x4000000) {
+    printf("[860-probe] K outside plausible range -- base constants are wrong.\n");
+    notifyf("[8.60 probe] FAILED\nK=0x%lx implausible", (unsigned long)K);
     return 1;
   }
 
-  /* Sanity-check the derived K by confirming the IDT really does hold
-   * plausible present gates whose handlers point into kernel text. A K
-   * that is merely self-consistent but wrong fails here. */
+  idt_va     = dbase + KSTUFF_0860_IDT;
+  gdt_va     = dbase + KSTUFF_0860_GDT;
+  tss_va     = dbase + KSTUFF_0860_TSS_ARRAY;
+  pcpu_va    = dbase + KSTUFF_0860_PCPU_ARRAY;
+  pmap_va    = dbase + KSTUFF_0860_PMAP_STORE;
+  allproc_va = dbase + KSTUFF_0860_ALLPROC;
+
+  /* ---- anchor 1: IDT ---------------------------------------------- */
   idt_ok = 0;
   for (i = 0; i < 256; i++) {
-    present = kread64(idtr.base + (uint64_t)i * 16);
-    if (present != 0 && idt_entry_plausible(present, tbase))
+    v = kread64(idt_va + (uint64_t)i * 16);
+    if (v != 0 && idt_entry_plausible(v, tbase))
       idt_ok++;
   }
-  printf("[860-probe] IDT plausible gates = %d/256\n", idt_ok);
+  printf("[860-probe] IDT        @0x%lx plausible gates = %d/256\n",
+         (unsigned long)idt_va, idt_ok);
 
+  /* ---- anchor 2: GDT ---------------------------------------------- */
   gdt_ok = 0;
-  for (i = 0; i < (gdtr.limit / 8) + 1 && i < 64; i++) {
-    if (kread64(gdtr.base + (uint64_t)i * 8) != 0)
+  for (i = 0; i < 64; i++) {
+    uint64_t e = kread64(gdt_va + (uint64_t)i * 8);
+    uint8_t type = (uint8_t)(e & 0xF);
+    if ((e != 0) && (type == 0x9 || type == 0xB || type == 0xA || type == 0x2))
       gdt_ok++;
   }
-  printf("[860-probe] GDT nonzero entries = %d/%d\n", gdt_ok, (gdtr.limit / 8) + 1);
+  printf("[860-probe] GDT        @0x%lx descriptors    = %d\n",
+         (unsigned long)gdt_va, gdt_ok);
 
-  /* Derived data-side addresses, using the agreed K. */
-  printf("[860-probe] -> IDT_ARRAY   ktext_off = 0x%lx\n",
-         (uint64_t)(k_idt + KSTUFF_0860_IDT));
-  printf("[860-probe] -> GDT_ARRAY   ktext_off = 0x%lx\n",
-         (uint64_t)(k_gdt + KSTUFF_0860_GDT));
-  printf("[860-probe] -> TSS_ARRAY   ktext_off = 0x%lx (unverified anchor)\n",
-         (uint64_t)(k_idt + KSTUFF_0860_TSS_ARRAY));
+  /* ---- corroboration: TSS, PCPU, pmap, allproc -------------------- */
+  tss_ok = 0;
+  for (i = 0; i < 16; i++) {
+    v = kread64(tss_va + (uint64_t)i * 0xA0);
+    if (looks_like_kptr(v, tbase))
+      tss_ok++;
+  }
+  printf("[860-probe] TSS_ARRAY  @0x%lx stack ptrs ok  = %d/16\n",
+         (unsigned long)tss_va, tss_ok);
 
-  /* Is kernel text readable on 8.60? Expected yes: this predates the
-   * enforced XOM that forces the hypervisor bypass in the first place.
-   * This is the single most valuable fact for the port.
-   *
-   * NOTE: util.c kread() unconditionally returns 0, so its return value
-   * cannot indicate success. Readability must be judged from content.
-   * Unreadable text reads back as an all-zero or all-ones span; real
-   * kernel text is neither. We print the raw bytes so the result can be
-   * judged offline rather than trusting a heuristic alone. */
-  probe = tbase;
+  pcpu_ok = 0;
+  for (i = 0; i < 16; i++) {
+    v = kread64(pcpu_va + (uint64_t)i * 8);
+    if (looks_like_kptr(v, tbase))
+      pcpu_ok++;
+  }
+  printf("[860-probe] PCPU_ARRAY @0x%lx ptrs ok       = %d/16\n",
+         (unsigned long)pcpu_va, pcpu_ok);
+
+  v = kread64(pmap_va);
+  pmap_ok = (v != 0);
+  printf("[860-probe] PMAP_STORE @0x%lx value         = 0x%lx (%s)\n",
+         (unsigned long)pmap_va, (unsigned long)v, pmap_ok ? "nonzero" : "ZERO");
+
+  v = kread64(allproc_va);
+  proc_ok = looks_like_kptr(v, tbase);
+  printf("[860-probe] ALLPROC    @0x%lx head          = 0x%lx (%s)\n",
+         (unsigned long)allproc_va, (unsigned long)v, proc_ok ? "kernel ptr" : "bad");
+
+  /* ---- is kernel text readable? ----------------------------------- */
+  /* util.c kread() unconditionally returns 0, so its return value says
+   * nothing about success. Judge by content instead: unreadable text
+   * reads back uniformly zero or uniformly 0xFF. The raw bytes are
+   * printed so the result can be checked offline. */
   memset(scratch, 0, sizeof scratch);
-  (void) kread(probe, scratch, sizeof scratch);
+  (void) kread(tbase, scratch, sizeof scratch);
 
   all_zero = 1;
   all_ones = 1;
   for (i = 0; i < (int)(sizeof scratch / sizeof scratch[0]); i++) {
-    uint64_t w = scratch[i];
     int b;
     for (b = 0; b < 8; b++) {
-      uint8_t v = (uint8_t)(w >> (b * 8));
-      if (v) all_zero = 0;
-      if (v != 0xFF) all_ones = 0;
+      uint8_t x = (uint8_t)(scratch[i] >> (b * 8));
+      if (x)        all_zero = 0;
+      if (x != 0xFF) all_ones = 0;
     }
   }
-
   text_readable = !(all_zero || all_ones);
 
-  printf("[860-probe] ktext @0x%lx first 16 bytes:\n", probe);
+  printf("[860-probe] ktext first 16 bytes:");
   for (i = 0; i < 16; i++)
-    printf("%s%02x", (i % 8) ? " " : "  ",
-           (unsigned int)((uint8_t *)scratch)[i]);
+    printf(" %02x", (unsigned int)((uint8_t *)scratch)[i]);
   printf("\n");
-  printf("[860-probe] raw qwords: %016lx %016lx\n", scratch[0], scratch[1]);
+  printf("[860-probe] ktext raw qwords: %016lx %016lx\n",
+         (unsigned long)scratch[0], (unsigned long)scratch[1]);
+  printf("[860-probe] ktext %s\n",
+         text_readable ? "READABLE (content is neither zero nor 0xFF)"
+                       : (all_zero ? "reads ALL ZERO -> not readable"
+                                   : "reads ALL 0xFF -> not readable"));
 
-  if (text_readable) {
-    printf("[860-probe] ktext READABLE (content is neither zero nor 0xFF).\n");
-    printf("[860-probe] dump ktext from here; offline tools do the rest.\n");
-  } else if (all_zero) {
-    printf("[860-probe] ktext reads ALL ZERO -> text is not readable.\n");
-  } else {
-    printf("[860-probe] ktext reads ALL 0xFF -> text is not readable.\n");
-  }
-
+  passes = (idt_ok > 0) + (gdt_ok > 0) + (tss_ok == 16) + (pcpu_ok == 16) +
+           (pmap_ok) + (proc_ok);
+  printf("[860-probe] anchors validated: %u/6\n", (unsigned int)passes);
   printf("[860-probe] done, wrote nothing\n");
 
-  /* Optional capture. With -DDUMP_KTEXT_SIZE=<bytes> the probe also
-   * streams a ktext image to stdout, framed so tools/receive_dump.py
-   * from the porting guide can consume it directly:
-   *
-   *   KTDUMP1 <base> <size>\n<raw bytes>\nKTDONE1\n
-   *
-   * It is still read-only: the dump is a copyout, nothing is written. */
 #ifdef DUMP_KTEXT_SIZE
   if (text_readable && DUMP_KTEXT_SIZE > 0) {
     uint64_t done = 0;
     static uint8_t chunk[0x1000];
-
-    printf("KTDUMP1 %lx %x\n", (unsigned long)probe, (unsigned int)DUMP_KTEXT_SIZE);
+    printf("KTDUMP1 %lx %x\n", (unsigned long)tbase, (unsigned int)DUMP_KTEXT_SIZE);
     while (done < (uint64_t)DUMP_KTEXT_SIZE) {
       uint64_t n = ((uint64_t)DUMP_KTEXT_SIZE - done) < sizeof chunk
                      ? ((uint64_t)DUMP_KTEXT_SIZE - done) : sizeof chunk;
-      (void) kread(probe + done, chunk, n);
+      (void) kread(tbase + done, chunk, n);
       if (fwrite(chunk, 1, n, stdout) != n) {
         printf("\n[dump] short write at 0x%lx\n", (unsigned long)done);
         break;
@@ -232,13 +207,15 @@ int main(void)
   }
 #endif
 
-  if (agrees && idt_ok > 0 && text_readable) {
-    notifyf("[8.60 probe] K=0x%lx OK\nIDT=%d/256 gates\nktext readable",
-            k_idt, idt_ok);
-  } else {
-    notifyf("[8.60 probe] inconclusive\nK_idt=%lx K_gdt=%lx\ngates=%d",
-            k_idt, k_gdt, idt_ok);
-  }
+  fflush(stdout);
+
+  if (passes >= 5)
+    notifyf("[8.60 probe] OK %u/6 anchors\nK=0x%lx\nktext %s",
+            (unsigned int)passes, (unsigned long)K,
+            text_readable ? "readable" : "BLOCKED");
+  else
+    notifyf("[8.60 probe] WEAK %u/6 anchors\nK=0x%lx",
+            (unsigned int)passes, (unsigned long)K);
 
   return 0;
 }
