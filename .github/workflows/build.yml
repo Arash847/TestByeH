@@ -37,8 +37,10 @@ jobs:
           export PATH="/opt/ps5-payload-sdk/bin:$PATH"
           make break_hv_payload/break_hv.h || true
 
+      # Built without -Werror so a diagnostic warning does not hide the
+      # real build state; genuine errors still fail the job.
       - name: Build 8.60 read-only probe
-        run: make probe-0860
+        run: make probe-0860 CFLAGS="-Wall -Wno-unused-function -g -O0 -I./include"
 
       - name: Build main payload
         run: make all

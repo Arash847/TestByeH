@@ -20,16 +20,21 @@
  */
 
 #include <sys/types.h>
+#include <stdio.h>
 #include <ps5/kernel.h>
 
 #include "util.h"
 #include "kdlsym.h"
 
 /* kstuff-lite 8_60.h, kdata-relative. Verified as kdata-rel by
- * cross-referencing the hardware-validated 11.60 tables. */
-#define KSTUFF_0860_IDT       0x2EB3DF0ULL
-#define KSTUFF_0860_GDT       0x2EB50D0ULL
-#define KSTUFF_0860_TSS_ARRAY 0x2EB6AD0ULL
+ * cross-referencing the hardware-validated 11.60 tables.
+ *
+ * No ULL suffixes: uint64_t is unsigned long on this target, so a ULL
+ * literal would widen arithmetic expressions to unsigned long long and
+ * break -Wformat against %lx. */
+#define KSTUFF_0860_IDT       0x2EB3DF0
+#define KSTUFF_0860_GDT       0x2EB50D0
+#define KSTUFF_0860_TSS_ARRAY 0x2EB6AD0
 
 struct idtr {
   uint16_t limit;
@@ -92,8 +97,9 @@ int main(void)
   tbase = ktext_base();
 
   printf("[860-probe] Byepervisor 8.60 stage-0 diagnostic\n");
-  printf("[860-probe] fw        = 0x%x\n", kernel_get_fw_version());
-  printf("[860-probe] soc_id    = 0x%x\n", sceKernelGetMainSocId());
+  printf("[860-probe] fw        = 0x%x\n",
+         (unsigned int)(kernel_get_fw_version() & 0xffffffffU));
+  printf("[860-probe] soc_id    = 0x%x\n", (unsigned int)sceKernelGetMainSocId());
   printf("[860-probe] ktext     = 0x%lx\n", tbase);
 
   read_idtr(&idtr);
@@ -146,17 +152,20 @@ int main(void)
 
   /* Derived data-side addresses, using the agreed K. */
   printf("[860-probe] -> IDT_ARRAY   ktext_off = 0x%lx\n",
-         k_idt + KSTUFF_0860_IDT);
+         (uint64_t)(k_idt + KSTUFF_0860_IDT));
   printf("[860-probe] -> GDT_ARRAY   ktext_off = 0x%lx\n",
-         k_gdt + KSTUFF_0860_GDT);
+         (uint64_t)(k_gdt + KSTUFF_0860_GDT));
   printf("[860-probe] -> TSS_ARRAY   ktext_off = 0x%lx (unverified anchor)\n",
-         k_idt + KSTUFF_0860_TSS_ARRAY);
+         (uint64_t)(k_idt + KSTUFF_0860_TSS_ARRAY));
 
   /* Is kernel text readable on 8.60? Expected yes: this predates the
    * enforced XOM that forces the hypervisor bypass in the first place.
-   * This is the single most valuable fact for the port. */
+   * This is the single most valuable fact for the port.
+   *
+   * kread64() returns a single qword and takes only an address; kread()
+   * is the copyout primitive that reports success as 0. */
   probe = tbase;
-  if (kread64(probe, scratch, sizeof scratch) == 0) {
+  if (kread(probe, scratch, sizeof scratch) == 0) {
     text_readable = 1;
     printf("[860-probe] ktext READABLE at 0x%lx: %016lx %016lx\n",
            probe, scratch[0], scratch[1]);
