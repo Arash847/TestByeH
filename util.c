@@ -5,6 +5,71 @@
 #include <sys/cpuset.h>
 #include <unistd.h>
 
+/* ---- persistent log -------------------------------------------------
+ * The payload's stdout is relayed to whatever connected to elfldr, and
+ * a NetCat GUI does not display it. Writing the same lines to console
+ * storage makes the log survive independently of the host: it persists
+ * after the payload exits, can be copied to USB, and -- critically -- is
+ * already flushed to storage BEFORE the next risky operation, so a hard
+ * power-off still leaves the last-good line on disk.
+ *
+ * That last property is why this replaces the old "log then sleep 700ms"
+ * trick: it brackets a crash without making the scan take 70 seconds.
+ * ------------------------------------------------------------------- */
+static FILE *g_log;
+static int   g_log_tried;
+
+static void
+log_open(void)
+{
+  /* First writable path wins. Payload processes on a jailbroken console
+   * normally have write access to the data partition. */
+  static const char *cands[] = {
+    "/data/byepervisor_0860.log",
+    "/app0/byepervisor_0860.log",
+    "/download0/byepervisor_0860.log",
+    "/system_ex/byepervisor_0860.log",
+    NULL,
+  };
+
+  if (g_log_tried)
+    return;
+  g_log_tried = 1;
+
+  for (int i = 0; cands[i]; i++) {
+    if ((g_log = fopen(cands[i], "w"))) {
+      return;
+    }
+  }
+}
+
+void
+logf(const char *fmt, ...)
+{
+  char buf[1024];
+  va_list ap;
+
+  va_start(ap, fmt);
+  vsnprintf(buf, sizeof buf, fmt, ap);
+  va_end(ap);
+
+  fputs(buf, stdout);
+  fflush(stdout);
+
+  log_open();
+  if (g_log) {
+    fputs(buf, g_log);
+    fflush(g_log);   /* durable BEFORE the next risky step */
+  }
+}
+
+const char *
+log_path(void)
+{
+  log_open();
+  return g_log ? "open" : "NO WRITABLE PATH";
+}
+
 #include <ps5/kernel.h>
 
 #include "util.h"

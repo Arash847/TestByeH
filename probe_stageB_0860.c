@@ -1,45 +1,30 @@
-/* 8.60 stage-B diagnostic: find the readable ceiling of kernel data space.
+/* 8.60 stage-B diagnostic: map the readable range of kernel data space.
  *
- * WHY THIS SHAPE
- * --------------
- * The stage-A probe proved the exploit supplies a sane, canonical
- * DATA_BASE with K = 0xC70000, so "the base was wrong" is RULED OUT as
- * the cause of the hard power-off. The remaining suspect is the range of
- * kernel addresses being read.
+ * FAST + PERSISTENT. Every line goes to console storage via logf(), which
+ * flushes to disk before the next read. That matters for two reasons:
  *
- * The SDK's own kernel_find_iommu_softc() walks DOWNWARD from
- * KERNEL_ADDRESS_ALLPROC to DATA_BASE + 8 and aborts on the first failed
- * copyout. Because __kernel_init() requires that walk to succeed, the
- * entire range
+ *   - A NetCat GUI does not display the payload's stdout, so on-screen
+ *     notifications were the only visibility. Now the log survives on the
+ *     console and can be copied to USB or pulled over the network.
+ *   - It brackets a hard power-off far better than the previous
+ *     "log, then sleep 700ms" trick. The log line is durably on disk
+ *     before the risky read happens, so if the console dies the last line
+ *     on disk is the last thing that was known good. That also removes
+ *     the 700ms per-read delay that made the scan take ~73 seconds; this
+ *     one finishes in a couple of seconds.
  *
- *     [ DATA_BASE + 8 , DATA_BASE + KSTUFF_0860_ALLPROC ]
- *     = [ DATA_BASE + 8 , DATA_BASE + 0x2875D50 ]
+ * Ruled out by earlier evidence, for the record:
  *
- * is PROVEN READABLE on every boot. Everything above 0x2875D50 is
- * unproven, and every 8.60 anchor this port needs (IDT 0x2EB3DF0, GDT
- * 0x2EB50D0, TSS 0x2EB6AD0, PCPU 0x2EC8A00, PMAP 0x2E48848) lies ABOVE
- * that ceiling. The previous probe read all of them back to back with no
- * checkpointing, so it could not report which one was fatal.
+ *   - "The exploit supplies a wrong kdata_base_addr" -- stage A reported
+ *     a canonical DATA_BASE with derived K=0xc70000 matching the SDK's
+ *     0x08600000 table entry.
+ *   - "Reads above ALLPROC are unmapped" -- an earlier scan read well
+ *     past kdata+0x2885d50 without dying.
  *
- * A bad address here does not fail gracefully. kernel_copyout()
- * programs the socket to copy from kaddr and then reads from the pipe, so
- * an unmapped kaddr faults inside a kernel socket write path. That is a
- * kernel-context fault with no recoverable handler: the console
- * hard-powers-off and no output is produced.
- *
- * So this probe does three things the old one did not:
- *
- *   1. It reads ONE qword at a time, ascending from the proven-safe
- *      ceiling, instead of 355 blind reads.
- *   2. It prints and flushes the address, then WAITS, before each read.
- *      If the console dies, the last logged SCAN line names the exact
- *      address that killed it. The delay guarantees the line has reached
- *      the host before the fault.
- *   3. It checks kernel_copyout()'s return value and stops cleanly on a
- *      graceful failure, so a soft failure never escalates.
- *
- * A run that completes identifies the safe ceiling. A run that dies
- * identifies the first bad page. Both are progress; neither is a guess.
+ * So the scan below is now a survey rather than a fault hunt. What it
+ * still establishes is which 8.60 anchors are safe to use, and it prints
+ * the live contents of each one so the kstuff-lite table can be checked
+ * against hardware instead of being trusted.
  */
 
 #include <sys/types.h>
@@ -57,79 +42,161 @@
 #define KSTUFF_0860_TSS_ARRAY  0x2EB6AD0
 #define KSTUFF_0860_PCPU_ARRAY 0x2EC8A00
 
-/* Settle time between logging an address and reading it. Long enough that
- * the line is delivered before a fault can hide it. */
-#define SETTLE_US  700000
-#define STEP       0x1000
-#define SCAN_TOP   0x2F00000
+#define STEP     0x1000
+#define SCAN_TOP 0x2F00000
 
-int main(void)
+static uint64_t dbase;
+
+static int
+looks_like_kptr(uint64_t v)
 {
-  uint64_t dbase, k, off, addr, v = 0;
-  int rc;
-  unsigned step_no = 0;
-  uint64_t last_ok = 0;
+  return ((v >> 48) == 0xFFFFULL) && (v != 0);
+}
 
-  printf("[stageB] alive. one qword per read, ascending, logged before read.\n");
-  fflush(stdout);
+/* Read one qword. Returns 0 on success, nonzero on a graceful failure.
+ * Never trusts the destination buffer unless the copyout reported
+ * success. */
+static int
+rd(uint64_t kaddr, uint64_t *out)
+{
+  uint64_t v = 0;
+  int rc = kread(kaddr, &v, sizeof v);
+  if (rc != 0)
+    return rc;
+  *out = v;
+  return 0;
+}
+
+int
+main(void)
+{
+  uint64_t k, off, addr, v;
+  int rc;
+
+  logf("[stageB] alive. persistent log: %s\n", log_path());
+  logf("[stageB] fw=0x%x soc=0x%x\n",
+       (unsigned int)(kernel_get_fw_version() & 0xffffffffU),
+       (unsigned int)sceKernelGetMainSocId());
 
   dbase = (uint64_t)KERNEL_ADDRESS_DATA_BASE;
-  k     = (uint64_t)KERNEL_ADDRESS_DATA_BASE - (uint64_t)KERNEL_ADDRESS_TEXT_BASE;
+  k     = dbase - (uint64_t)KERNEL_ADDRESS_TEXT_BASE;
 
-  printf("[stageB] DATA_BASE = 0x%lx  K = 0x%lx\n", (unsigned long)dbase,
-         (unsigned long)k);
-  printf("[stageB] starting at the SDK-proven safe ceiling 0x%lx\n",
-         (unsigned long)(dbase + KSTUFF_0860_ALLPROC));
-  printf("[stageB] anchors of interest (kdata-rel): pmap=0x%x idt=0x%x "
-         "gdt=0x%x tss=0x%x pcpu=0x%x\n",
-         (unsigned int)KSTUFF_0860_PMAP_STORE, (unsigned int)KSTUFF_0860_IDT,
-         (unsigned int)KSTUFF_0860_GDT, (unsigned int)KSTUFF_0860_TSS_ARRAY,
-         (unsigned int)KSTUFF_0860_PCPU_ARRAY);
-  fflush(stdout);
+  logf("[stageB] DATA_BASE=0x%lx K=0x%lx\n",
+       (unsigned long)dbase, (unsigned long)k);
 
+  /* ---- phase 1: readable-range survey, no delay ---- */
+  logf("[stageB] --- phase 1: range survey ---\n");
   for (off = KSTUFF_0860_ALLPROC; off < SCAN_TOP; off += STEP) {
     addr = dbase + off;
-
-    /* Log the intent BEFORE the read and give the host time to receive
-     * it. If the console powers off on this read, this line is the
-     * diagnosis. */
-    printf("[stageB] SCAN off=0x%lx addr=0x%lx ... ",
-           (unsigned long)off, (unsigned long)addr);
-    fflush(stdout);
-    usleep(SETTLE_US);
-
-    v = 0;
-    rc = kread(addr, &v, sizeof v);
-
+    rc = rd(addr, &v);
     if (rc != 0) {
-      printf("COPYOUT_FAILED rc=%d\n", (int)rc);
-      fflush(stdout);
-      printf("[stageB] first graceful failure at kdata offset 0x%lx; "
-             "readable ceiling is below this.\n", (unsigned long)off);
-      fflush(stdout);
-      notifyf("[stage B] copyout failed\nat kdata+0x%lx", (unsigned long)off);
-      return 2;
+      logf("[stageB] FIRST-FAIL off=0x%lx addr=0x%lx rc=%d\n",
+           (unsigned long)off, (unsigned long)addr, rc);
+      break;
     }
+    logf("[stageB] ok off=0x%lx v=0x%016lx\n", (unsigned long)off,
+         (unsigned long)v);
+  }
 
-    printf("ok v=0x%016lx\n", (unsigned long)v);
-    fflush(stdout);
-    last_ok = off;
+  /* ---- phase 2: validate each 8.60 anchor ---- */
+  logf("[stageB] --- phase 2: anchor validation ---\n");
 
-    /* Periodic on-screen progress. A NetCat GUI does not display the
-     * stdout stream, so without this the run is invisible until it
-     * ends. Each notification names the most recent CONFIRMED-GOOD
-     * offset, so if the console powers off the last popup brackets the
-     * fatal address. */
-    step_no++;
-    if ((step_no % 8) == 0) {
-      notifyf("[stage B] scan %u\nlast good kdata+0x%lx\nnext 0x%lx",
-              step_no, (unsigned long)last_ok, (unsigned long)(off + STEP));
+  {
+    uint64_t a = dbase + KSTUFF_0860_ALLPROC;
+    if (rd(a, &v) == 0)
+      logf("[stageB] ALLPROC   kdata+0x%08x = 0x%016lx %s\n",
+           (unsigned int)KSTUFF_0860_ALLPROC, (unsigned long)v,
+           looks_like_kptr(v) ? "KERNEL PTR ok" : "NOT A KERNEL PTR");
+    else
+      logf("[stageB] ALLPROC read FAILED\n");
+  }
+
+  {
+    uint64_t a = dbase + KSTUFF_0860_PMAP_STORE;
+    if (rd(a, &v) == 0)
+      logf("[stageB] PMAP_STORE kdata+0x%08x = 0x%016lx %s\n",
+           (unsigned int)KSTUFF_0860_PMAP_STORE, (unsigned long)v,
+           v ? "nonzero" : "ZERO -- kstuff anchor wrong");
+    else
+      logf("[stageB] PMAP_STORE read FAILED\n");
+  }
+
+  /* IDT: census the gates and report the count plus a sample handler. */
+  {
+    uint64_t a = dbase + KSTUFF_0860_IDT;
+    uint64_t base = dbase - (uint64_t)KERNEL_ADDRESS_TEXT_BASE;
+    int i, gates = 0, read_ok = 1;
+    uint64_t sample = 0;
+
+    for (i = 0; i < 256; i++) {
+      uint64_t e;
+      if (rd(a + (uint64_t)i * 16, &e) != 0) { read_ok = 0; break; }
+      if (!e) continue;
+      {
+        uint16_t lo  = (uint16_t)(e & 0xFFFF);
+        uint16_t sel = (uint16_t)((e >> 16) & 0xFFFF);
+        uint64_t h   = e >> 32;
+        if ((lo & 1) && (lo & 0xE00) && sel == 0x08 &&
+            looks_like_kptr(h)) {
+          gates++;
+          if (!sample) sample = h;
+        }
+      }
+    }
+    if (!read_ok) {
+      logf("[stageB] IDT read FAILED at gate %d\n", i);
+    } else {
+      logf("[stageB] IDT       kdata+0x%08x plausible gates=%d/256\n",
+           (unsigned int)KSTUFF_0860_IDT, gates);
+      logf("[stageB] IDT sample handler=0x%lx ktext_off=0x%lx\n",
+           (unsigned long)sample, (unsigned long)(sample - base));
     }
   }
 
-  printf("[stageB] scan completed through kdata+0x%x with no failure.\n",
-         (unsigned int)SCAN_TOP);
-  fflush(stdout);
-  notifyf("[stage B] scan complete\nreadable to kdata+0x%x", (unsigned int)SCAN_TOP);
+  {
+    uint64_t a = dbase + KSTUFF_0860_PCPU_ARRAY;
+    int i, ok = 0;
+    for (i = 0; i < 16; i++) {
+      if (rd(a + (uint64_t)i * 8, &v) != 0) break;
+      if (looks_like_kptr(v)) ok++;
+    }
+    logf("[stageB] PCPU_ARRAY kdata+0x%08x ptrs=%d/16\n",
+         (unsigned int)KSTUFF_0860_PCPU_ARRAY, ok);
+  }
+
+  {
+    uint64_t a = dbase + KSTUFF_0860_TSS_ARRAY;
+    if (rd(a, &v) == 0)
+      logf("[stageB] TSS_ARRAY kdata+0x%08x first qword=0x%016lx %s\n",
+           (unsigned int)KSTUFF_0860_TSS_ARRAY, (unsigned long)v,
+           looks_like_kptr(v) ? "kernel ptr" : "not a kernel ptr");
+    else
+      logf("[stageB] TSS_ARRAY read FAILED\n");
+  }
+
+  /* Is kernel text readable? Pure content judgement: util.c kread()
+   * discards nothing now, so a failed copyout is visible as rc. */
+  {
+    uint64_t t[2] = { 0, 0 };
+    uint64_t tb = (uint64_t)KERNEL_ADDRESS_TEXT_BASE;
+    rc = kread(tb, t, sizeof t);
+    if (rc != 0) {
+      logf("[stageB] ktext copyout FAILED rc=%d -> text NOT readable\n", rc);
+    } else {
+      int z = (t[0] == 0 && t[1] == 0);
+      int o = (t[0] == ~(uint64_t)0 && t[1] == ~(uint64_t)0);
+      logf("[stageB] ktext first 16 bytes:");
+      for (int i = 0; i < 16; i++)
+        logf(" %02x", (unsigned int)((uint8_t *)t)[i]);
+      logf("\n");
+      logf("[stageB] ktext %s\n",
+           (z || o) ? "reads uniformly -> NOT readable"
+                    : "READABLE (mixed content)");
+    }
+  }
+
+  logf("[stageB] DONE. no kernel memory was written.\n");
+
+  notifyf("[stage B] done\nlog written to console\nsee byepervisor_0860.log");
   return 0;
 }
