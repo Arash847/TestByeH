@@ -27,6 +27,7 @@ endif
 ELF := byepervisor_reborn.elf
 PROBE_0860_ELF := byepervisor_probe_0860.elf
 STAGEA_0860_ELF := byepervisor_stageA_0860.elf
+STAGEB_0860_ELF := byepervisor_stageB_0860.elf
 ISSUE9_ELF := byepervisor_issue9_diag.elf
 ISSUE9_DR0_ELF := byepervisor_issue9_dr0_diag.elf
 ISSUE9_RESUME_ELF := byepervisor_issue9_resume_diag.elf
@@ -59,6 +60,14 @@ $(STAGEA_0860_ELF): util.c probe_stageA_0860.c
 	$(CC) $(CFLAGS) -o $@ $(filter %.c,$^)
 
 stageA-0860: $(STAGEA_0860_ELF)
+
+# Stage B: finds the readable ceiling of kernel data space. One qword per
+# read, ascending from the SDK-proven safe ceiling, address logged and
+# flushed before each read so a hard-off names the fatal address.
+$(STAGEB_0860_ELF): util.c probe_stageB_0860.c
+	$(CC) $(CFLAGS) -o $@ $(filter %.c,$^)
+
+stageB-0860: $(STAGEB_0860_ELF)
 
 # Stage B: reads kernel memory. Only run after stageA-0860 reports a sane,
 # canonical DATA_BASE whose derived K matches the expected per-firmware K.

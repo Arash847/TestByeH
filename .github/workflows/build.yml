@@ -41,6 +41,9 @@ jobs:
       - name: Build stage-A print-only probe
         run: make stageA-0860 CFLAGS="-Wall -Wno-unused-function -g -O0 -I./include"
 
+      - name: Build stage-B readable-ceiling scan
+        run: make stageB-0860 CFLAGS="-Wall -Wno-unused-function -g -O0 -I./include"
+
       # Stage B reads kernel memory. Built but NOT the thing to run first.
       - name: Build 8.60 read-only probe
         run: make probe-0860 CFLAGS="-Wall -Wno-unused-function -g -O0 -I./include"
@@ -56,6 +59,7 @@ jobs:
           if-no-files-found: warn
           path: |
             byepervisor_stageA_0860.elf
+            byepervisor_stageB_0860.elf
             byepervisor_probe_0860.elf
             byepervisor_reborn.elf
             break_hv_payload/break_hv.bin

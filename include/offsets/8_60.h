@@ -20,9 +20,9 @@
  *
  * TO COMPLETE THIS TABLE you need, in this order:
  *
- *   1. K = kdata_base - ktext_base for 8.60, confirmed by at least two
- *      independent anchors. Do NOT substitute a neighbouring
- *      firmware's K.
+ *   1. DONE. K = kdata_base - ktext_base = 0xC70000 for 8.60, confirmed
+ *      on hardware by the stage-A probe (reported fw=0x8600004, derived
+ *      K=0xc70000, matching the SDK's 0x08600000 table entry).
  *   2. A trusted 8.60 kernel .text image, and ideally an hvcore
  *      image. Validate the image first (tools/validate_image.py) and
  *      cross-check one structure against hardware.
@@ -138,10 +138,10 @@ uint64_t g_sym_map_0860[] = {
   0,          // KERNEL_SYM_ACPI_SLEEP_MACHDEP_HOOK basis ktext, NOT IN KSTUFF
   0,          // KERNEL_SYM_HV_MP_STARTUP_CALL      basis ktext, NOT IN KSTUFF
   0,          // KERNEL_SYM_MP_STARTUP_INIT_VECTOR  basis ktext, NOT IN KSTUFF
-  0,          // KERNEL_SYM_PMAP_STORE              = K + KSTUFF_0860_KERNEL_PMAP_STORE
+  0x3AB8848,  // KERNEL_SYM_PMAP_STORE   ktext-rel, DERIVED + FORMULA-PROVEN
   0,          // KERNEL_SYM_DATA_CAVE               basis kdata, NOT IN KSTUFF
-  0,          // KERNEL_SYM_IDT_ARRAY               = K + KSTUFF_0860_IDT
-  0,          // KERNEL_SYM_COMMON_TSS              = K + KSTUFF_0860_TSS_ARRAY
+  0x3B23DF0,  // KERNEL_SYM_IDT_ARRAY   ktext-rel, DERIVED + FORMULA-PROVEN
+  0x3B26AD0,  // KERNEL_SYM_COMMON_TSS  ktext-rel, DERIVED + FORMULA-PROVEN
   0,          // HV_SYM_HEAP_BASE    -- 0 = use runtime VMCB discovery
   0,          // HV_SYM_PCPUS        -- 0 = use runtime VMCB discovery
 };
