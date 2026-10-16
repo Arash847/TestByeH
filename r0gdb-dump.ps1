@@ -106,6 +106,18 @@ function Invoke-Remote([string]$payload) {
 }
 
 # --- handshake -------------------------------------------------------
+# prosper0gdb requires the client to send a literal '+' as the VERY FIRST
+# byte on connect, and abandons the stub outright if it does not:
+#
+#   if (read(gdb_socket, &plus, 1) != 1 || plus != '+')
+#           return;
+#
+# So this must precede every packet, including qSupported. Omitting it
+# kills the stub within milliseconds of connecting.
+$hello = [Text.Encoding]::ASCII.GetBytes("+")
+$stream.Write($hello, 0, 1)
+$stream.Flush()
+
 $sup = Invoke-Remote "qSupported:multiprocess+"
 Write-Host "[r0gdb] qSupported -> $sup"
 
@@ -161,7 +173,11 @@ while ($done -lt $total) {
 
   if (($n % 64) -eq 0) {
     $pct = [math]::Round(100.0 * $done / $total, 1)
-    Write-Host ("[r0gdb] {0,6:N1}%  {1} / {2} bytes" -f $pct, $done, $total)
+    # Build the string first. Write-Host ("fmt" -f $a, $b) gets parsed as
+    # Write-Host receiving TWO arguments, and the second is then bound to
+    # -ForegroundColor, which fails on a numeric value.
+    $progressMsg = "[r0gdb] {0,6:N1}%  {1} / {2} bytes" -f $pct, $done, $total
+    Write-Host $progressMsg
   }
 }
 
@@ -175,6 +191,7 @@ $hash = (Get-FileHash -Algorithm SHA256 $Out).Hash.ToLower()
 Write-Host ""
 Write-Host ("[r0gdb] wrote {0} ({1:N2} MB) in {2:N1}s" -f $Out, ((Get-Item $Out).Length / 1MB), $sw.Elapsed.TotalSeconds)
 Write-Host "[r0gdb] sha256 $hash"
-Write-Host "[r0gdb] expected size 0x{0:x} ({1} bytes)" -f $total, $total
+$sizeMsg = "[r0gdb] expected size 0x{0:x} ({1} bytes)" -f $total, $total
+Write-Host $sizeMsg
 
 

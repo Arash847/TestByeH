@@ -26,6 +26,18 @@ $stream = $client.GetStream()
 $stream.ReadTimeout = 60000
 Write-Host "[mock] client connected"
 
+# Mirror the real stub, which abandons itself unless the first byte on the
+# connection is a literal '+'. Modelling this is what caught the missing
+# hello byte in r0gdb-dump.ps1.
+$hello = New-Object byte[] 1
+$null = $stream.Read($hello, 0, 1)
+if ([char]$hello[0] -ne '+') {
+    Write-Host "[mock] client did not send plus first -- real stub would have died"
+    $client.Close(); $listener.Stop()
+    return
+}
+Write-Host "[mock] got plus handshake"
+
 function Send-Packet([string]$payload) {
   $pkt = '$' + $payload + '#' + ('{0:x2}' -f (Get-Checksum $payload))
   $b = [Text.Encoding]::ASCII.GetBytes($pkt)

@@ -63,11 +63,40 @@ jobs:
           test -f prosper0gdb/offsets/8_60.h
           echo "8.60 anchor table present"
 
+      # The prosper0gdb stub is compiled OUT by default. In
+      # ps5-kstuff/main.c:
+      #   #ifndef DEBUG
+      #   #define dbg_enter()
+      #   #define gdb_remote_syscall(...)
+      #   #endif
+      # Without -DDEBUG, dbg_enter() is a no-op and no port is ever bound.
+      # EXTRA_CFLAGS is read from the environment by make and threaded
+      # into both the payload.elf and uelf compile rules, so exporting it
+      # is enough -- ci-ps5-kstuff-ldr.sh needs no modification.
+      - name: Verify DEBUG guard present
+        run: |
+          cd kstuff-lite
+          grep -q "^#ifndef DEBUG" ps5-kstuff/main.c
+          grep -q "define dbg_enter()" ps5-kstuff/main.c
+          echo "DEBUG guard present; building with -DDEBUG"
+
       - name: Build
         run: |
           cd kstuff-lite
           export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+          export EXTRA_CFLAGS=-DDEBUG
           bash ci-ps5-kstuff-ldr.sh
+
+      # Weak check only -- the stub strings may be stripped or inlined.
+      # The real verification is the runtime port scan on the console.
+      - name: Sanity-check stub presence
+        run: |
+          cd kstuff-lite
+          if grep -aq "qSupported" ps5-kstuff/payload.bin; then
+            echo "gdb stub strings present in payload.bin"
+          else
+            echo "::warning::qSupported not found; may be stripped. Verify with scan-ports.ps1."
+          fi
 
       - name: Report
         run: |
