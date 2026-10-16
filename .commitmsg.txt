@@ -1,0 +1,21 @@
+Enable the interrupter thread in the kstuff build
+
+interrupter_thread exists in gdb_stub/dbg.c but is compiled out: it sits
+behind #ifdef INTERRUPTER_THREAD, is never defined anywhere in the repo,
+and -DDEBUG does not enable it.
+
+    for(;;) {
+        FD_SET(gdb_socket, &a);
+        if (select(gdb_socket+1, &a, &b, &b, NULL) > 0) break;
+    }
+    if (!in_signal_handler)
+        kill(getpid(), SIGINT);
+
+That thread is the missing trigger. It polls the gdb socket and raises
+SIGINT the moment any data arrives, which drops into signal_handler and
+services the packet that just arrived. With it disabled, nothing polls
+the socket, so a client can connect and send packets but the stub only
+ever services them from a real hardware trap. Observed exactly that:
+connection accepted, then silent, and eventually ECONNRESET on write.
+
+Build now passes -DDEBUG -DINTERRUPTER_THREAD.

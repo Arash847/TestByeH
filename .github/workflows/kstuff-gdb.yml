@@ -84,8 +84,20 @@ jobs:
         run: |
           cd kstuff-lite
           export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
-          export EXTRA_CFLAGS=-DDEBUG
+          # -DDEBUG un-defines dbg_enter(). -DINTERRUPTER_THREAD enables
+          # the thread that select()s on gdb_socket and kill(getpid(),
+          # SIGINT)s when data arrives; without it nothing polls the
+          # socket, so packets are never serviced outside a hardware trap
+          # and the stub behaves as if dead.
+          export EXTRA_CFLAGS="-DDEBUG -DINTERRUPTER_THREAD"
           bash ci-ps5-kstuff-ldr.sh
+
+      - name: Confirm interrupter thread enabled
+        run: |
+          cd kstuff-lite
+          grep -q "^#ifdef INTERRUPTER_THREAD" gdb_stub/dbg.c
+          grep -q "kill(getpid(), SIGINT)" gdb_stub/dbg.c
+          echo "interrupter thread present and enabled"
 
       # Weak check only -- the stub strings may be stripped or inlined.
       # The real verification is the runtime port scan on the console.
