@@ -27,7 +27,8 @@ param(
   [string]$Start = "0xFFFFFFFF81000000",
   [string]$End   = "0xFFFFFFFF81C70000",
   [string]$Out   = "ktext-8.60.bin",
-  [int]$Chunk    = 0x1000
+  [int]$Chunk    = 0x1000,
+  [int]$WaitSeconds = 300
 )
 
 $ErrorActionPreference = "Stop"
@@ -45,9 +46,27 @@ $total     = $endAddr - $startAddr
 if ($total -le 0) { throw "End must be greater than Start" }
 if ($Chunk -le 0 -or ($Chunk % 2) -ne 0) { throw "Chunk must be a positive even number" }
 
-Write-Host "[r0gdb] connecting to $Console`:$Port ..."
-$client = New-Object Net.Sockets.TcpClient
-$client.Connect($Console, $Port)
+Write-Host "[r0gdb] waiting for the stub on $Console`:$Port ..."
+# The stub binds its port partway through kstuff's startup, so poll rather
+# than connecting once and failing. Start this BEFORE loading kstuff.elf.
+$client = $null
+$deadline = (Get-Date).AddSeconds($WaitSeconds)
+while ((Get-Date) -lt $deadline) {
+  try {
+    $c = New-Object Net.Sockets.TcpClient
+    $iar = $c.BeginConnect($Console, $Port, $null, $null)
+    if ($iar.AsyncWaitHandle.WaitOne(250)) {
+      $c.EndConnect($iar)
+      $client = $c
+      break
+    }
+    $c.Close()
+  } catch { }
+}
+if (-not $client) {
+  throw "no stub on $Console`:$Port within $WaitSeconds s -- is kstuff loaded?"
+}
+Write-Host "[r0gdb] connected."
 $stream = $client.GetStream()
 $stream.ReadTimeout = 30000
 $stream.WriteTimeout = 30000
