@@ -1,9 +1,15 @@
-Make the dumper poll for the stub instead of connecting once
+Revert -DINTERRUPTER_THREAD: enabling it regresses kstuff startup
 
-The stub binds its port partway through kstuff startup, so a single
-connect attempt raced the user's reload and lost. The dumper now polls
-until the port answers, so it can be started BEFORE kstuff.elf is loaded
-and removes the timing pressure entirely.
+Measured on the console: with -DDEBUG -DINTERRUPTER_THREAD the stub port
+stopped opening entirely. 9021 was open (elfldr healthy) but nothing was
+listening on 1234-1280, which is worse than the -DDEBUG-only build where
+1234 did open.
 
-Verified against a mock deliberately delayed by 6 seconds: connected,
-handshaked and dumped with zero byte mismatches.
+start_interrupter_thread() is invoked before the listening socket is
+bound, so its select() operates on an uninitialised gdb_socket and
+startup fails before accept() ever runs. The hypothesis that the missing
+interrupter thread was the reason packets went unserviced was wrong, or at
+least enabling it is not the way to fix that.
+
+Back to -DDEBUG only, which is the last configuration known to bring the
+stub up.
