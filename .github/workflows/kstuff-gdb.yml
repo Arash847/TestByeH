@@ -1,0 +1,84 @@
+name: kstuff-gdb
+
+# Builds kstuff-lite's loader with the prosper0gdb stub bundled, which is
+# how the 8.60 kernel text dump is obtained. This replaces the custom read
+# probes, which power off the console because kernel_copyout() cannot be
+# issued back to back through the socket-overlap primitive.
+#
+# The build steps mirror kstuff-lite's own .github/workflows/ci.yml, which
+# is the authoritative recipe. Note that upstream installs the toolchain
+# from the pacbrew-repo tarball, NOT the ps5-payload-sdk zip.
+
+on:
+  push:
+    paths:
+      - "docs/PROSPER0GDB.md"
+      - ".github/workflows/kstuff-gdb.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.ref }}-kstuff-gdb
+  cancel-in-progress: true
+
+env:
+  # Pinned so a later upstream commit cannot silently change the offsets
+  # table this dump is validated against.
+  KSTUFF_COMMIT: 48cd2c4ce62aa9ca0c2cc014c1e512f276ae7c17
+
+jobs:
+  kstuff:
+    name: Build kstuff.elf (prosper0gdb)
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang-18 lld-18 xxd yasm nasm python3
+
+      # Upstream ci.yml uses the pacbrew-repo tarball rather than the
+      # sdk zip release; they land in the same /opt path.
+      - name: Install toolchain
+        run: |
+          wget -q https://github.com/ps5-payload-dev/pacbrew-repo/releases/latest/download/ps5-payload-dev.tar.gz
+          sudo tar xf ps5-payload-dev.tar.gz -C /
+          ls -la /opt/ps5-payload-sdk
+
+      - name: Clone kstuff-lite at pinned commit
+        run: |
+          git clone --filter=blob:none https://github.com/EchoStretch/kstuff-lite.git
+          cd kstuff-lite
+          git checkout "$KSTUFF_COMMIT"
+          echo "pinned: $(git rev-parse HEAD)"
+
+      # Cheap guard: if upstream ever drops 8.60 support the dump would
+      # silently be produced with the wrong offsets table.
+      - name: Verify 8.60 is natively supported
+        run: |
+          cd kstuff-lite
+          grep -n "case 0x860" prosper0gdb/offsets.c
+          test -f prosper0gdb/offsets/8_60.h
+          echo "8.60 anchor table present"
+
+      - name: Build
+        run: |
+          cd kstuff-lite
+          export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
+          bash ci-ps5-kstuff-ldr.sh
+
+      - name: Report
+        run: |
+          cd kstuff-lite
+          ls -l ps5-kstuff-ldr/kstuff.elf
+          sha256sum ps5-kstuff-ldr/kstuff.elf
+          cp ps5-kstuff-ldr/kstuff.elf "$GITHUB_WORKSPACE/kstuff.elf"
+
+      - name: Upload kstuff.elf
+        uses: actions/upload-artifact@v4
+        with:
+          name: kstuff-elf
+          path: kstuff.elf
+          if-no-files-found: error
