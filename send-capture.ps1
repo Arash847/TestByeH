@@ -1,4 +1,4 @@
-# Send a payload to elfldr and capture the payload's stdout to a file.
+﻿# Send a payload to elfldr and capture the payload's stdout to a file.
 #
 # NetCat GUIs do not display the data they receive, which makes every
 # diagnostic in this repo invisible. The payload's printf output comes
@@ -7,10 +7,10 @@
 #
 # Usage:
 #   powershell -ExecutionPolicy Bypass -File send-capture.ps1 `
-#       -Host 192.168.1.50 -Payload .\byepervisor_stageB_0860.elf `
+#       -Console 192.168.1.50 -Payload .\byepervisor_stageB_0860.elf `
 #       -Out stageB.log -Seconds 180
 param(
-  [Parameter(Mandatory=$true)][string]$Host,
+  [Parameter(Mandatory=$true)][string]$Console,
   [Parameter(Mandatory=$true)][string]$Payload,
   [string]$Out = "payload.log",
   [int]$Port = 9021,
@@ -19,10 +19,10 @@ param(
 
 $ErrorActionPreference = "Stop"
 $bytes = [IO.File]::ReadAllBytes($Payload)
-Write-Host "[send] $Payload ($($bytes.Length) bytes) -> $Host`:$Port"
+Write-Host "[send] $Payload ($($bytes.Length) bytes) -> $Console`:$Port"
 
 $client = New-Object Net.Sockets.TcpClient
-$client.Connect($Host, $Port)
+$client.Connect($Console, $Port)
 $stream = $client.GetStream()
 
 $stream.Write($bytes, 0, $bytes.Length)
@@ -60,3 +60,5 @@ Write-Host "[recv] $total bytes captured -> $Out"
 if ($total -eq 0) {
   Write-Warning "No data received. Either the payload never started, or the loader did not relay stdout."
 }
+
+
