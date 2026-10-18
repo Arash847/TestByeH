@@ -47,12 +47,19 @@ $(DUMP_0860_ELF): dump860.c util.c
 
 dump860: $(DUMP_0860_ELF)
 
-# Without this, make applies its builtin "%: %.c" rule to the target
-# `dump860`, matching dump860.c, and tries to link the source against the
-# already-built ELF. Result: "undefined symbol" from a bogus second
-# compile, which is not the payload failing but make building the wrong
-# thing.
-.PHONY: dump860 all clean test
+# PML4 census. Reads the whole 4KB root page table in ONE transfer rather
+# than 512 small ones, which is the pattern that destabilises this
+# console. Diagnostic only.
+PML4_0860_ELF := byepervisor_pml4_0860.elf
+
+$(PML4_0860_ELF): probe_pml4.c util.c
+	$(CC) $(CFLAGS) -o $@ $(filter %.c,$^)
+
+probe-pml4: $(PML4_0860_ELF)
+
+# Without this, make applies its builtin "%: %.c" rule to the dump860
+# target, matching dump860.c, and links the source against the built ELF.
+.PHONY: dump860 all clean test probe-pml4
 
 PAYLOAD_DIR := break_hv_payload
 PAYLOAD_HDR := $(PAYLOAD_DIR)/break_hv.h

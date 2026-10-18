@@ -1,1 +1,22 @@
-Restore constants dropped while removing a duplicated hex2ull signature
+Add a PML4 census that reads the whole root table in one transfer
+
+The console diag log showed the direct map derivation is correct:
+
+    pm_pml4  = 0xffff8d072424d000
+    pm_cr3   = 0x2424d000
+    dmap     = pm_pml4 - pm_cr3 = 0xffff8d0700000000
+    dmap+cr3 = pm_pml4   (exact match, as expected)
+
+so the earlier read of dmap as garbage was a real fix and the remaining
+failure is the per-entry page walk, not the map.
+
+A per-entry walk is 512 small copyouts, which is the same pattern that has
+been destabilising this console. This diagnostic instead reads the entire
+4KB PML4 in ONE transfer, saves it to /data/bye860_pml4.bin, and reports
+which slots are populated plus the entry that kernel text should live
+behind.
+
+It also answers the question that decides whether any of this can work: if
+that single 4KB physmap read is refused, then XOM blocks the physmap as
+well, the dump approach is closed, and the remaining offsets have to come
+from execution evidence rather than from an image.

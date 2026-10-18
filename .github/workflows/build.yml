@@ -36,6 +36,9 @@ jobs:
       - name: Build 8.60 dumper (fast variant)
         run: make dump860 FAST=1
 
+      - name: Build PML4 census diagnostic
+        run: make probe-pml4
+
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -45,6 +48,7 @@ jobs:
             byepervisor_reborn.elf
             byepervisor_dump_0860.elf
             byepervisor_dump_0860_fast.elf
+            byepervisor_pml4_0860.elf
 
   audit:
     name: Safety audit
