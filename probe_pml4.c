@@ -143,8 +143,71 @@ int main(void)
     memcpy(&e, &pml4[idx * 8], sizeof e);
     diag("[pml4] entry[%lu] = 0x%016lx present=%d\n",
          (unsigned long)idx, (unsigned long)e, (int)(e & 1));
-    diag("[pml4] if present==0 the kernel map is not at this index,\n");
-    diag("[pml4] which is why the walk failed.\n");
+  }
+
+  /* ---- walk trace -------------------------------------------------
+   * The physmap read works, so every level should be reachable. The
+   * dumper only reported "walk failed" without naming the level, so trace
+   * it: table base, index used, entry read back, and where it goes next.
+   * This pins the failing level instead of inferring it. */
+  diag("\n[pml4] --- walk trace for 0x%lx ---\n", (unsigned long)KTEXT_BASE);
+  {
+    uint64_t tbl = pm_cr3 & 0x000FFFFFFFFFF000ULL;
+    int lvl;
+
+    for (lvl = 0; lvl < 5; lvl++) {
+      int      shift = 39 - 9 * lvl;
+      uint64_t index = (KTEXT_BASE >> shift) & 0x1FFULL;
+      uint64_t addr  = dmap + tbl + index * 8;
+      uint64_t e     = 0;
+      int      rc    = (int)kernel_copyout(addr, &e, sizeof e);
+
+      diag("[pml4] lvl%d shift=%2d idx=%3lu addr=0x%lx rc=%d",
+           lvl, shift, (unsigned long)index, (unsigned long)addr, rc);
+
+      if (rc != 0) {
+        diag("  <== READ FAILED here; physmap may not cover table 0x%lx\n",
+             (unsigned long)tbl);
+        break;
+      }
+
+      diag("  entry=0x%016lx P=%d W=%d PS=%d U=%d\n", (unsigned long)e,
+           (int)(e & 1), (int)((e >> 1) & 1), (int)((e >> 7) & 1),
+           (int)((e >> 2) & 1));
+
+      if (!(e & 1ULL)) {
+        diag("  <== NOT PRESENT here\n");
+        break;
+      }
+
+      if ((e & 0x80ULL) || shift == 12) {
+        uint64_t leaf;
+        uint8_t  probe16[16];
+        int      rc2;
+
+        if (shift == 12)
+          leaf = (e & 0x000FFFFFFFFFF000ULL) | (KTEXT_BASE & 0xFFF);
+        else
+          leaf = (e & ((1ULL << 52) - (1ULL << shift))) |
+                 (KTEXT_BASE & ((1ULL << shift) - 1));
+
+        diag("[pml4] leaf physical = 0x%lx\n", (unsigned long)leaf);
+        diag("[pml4] physmap read addr = 0x%lx\n", (unsigned long)(dmap + leaf));
+
+        rc2 = (int)kernel_copyout(dmap + leaf, probe16, sizeof probe16);
+        diag("[pml4] text read rc=%d\n", rc2);
+        if (rc2 == 0) {
+          int b;
+          diag("[pml4] first bytes:");
+          for (b = 0; b < 16; b++)
+            diag(" %02x", probe16[b]);
+          diag("\n[pml4] if these are x86-64, the XOM bypass works\n");
+        }
+        break;
+      }
+
+      tbl = e & 0x000FFFFFFFFFF000ULL;
+    }
   }
 
   notifyf("[pml4] census done\n%lu slots present\nroot=0x%lx",
