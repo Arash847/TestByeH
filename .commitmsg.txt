@@ -1,1 +1,24 @@
-Drop an unused shifts table left over from the rewrite
+Iterate populated regions instead of following only the first
+
+Console log showed the descent was correct but walked into a hole:
+
+    PDPT[0] = 0x0000000023150063 (PS=0)
+    PD[0]   = 0x0000000023151063 (PS=0)
+    PT has no populated entry
+
+A populated PD whose page table is entirely empty is simply an unmapped
+2MB region, so following the first populated entry at each level dead-ends
+regardless of how correct the walk is. Kernel text lives elsewhere in the
+kernelmap and which region holds it is not knowable in advance.
+
+This now iterates populated entries across the region, opens each page
+directory, counts its populated PDEs, skips regions with none, and reads
+candidate pages until one has real content. PDPT and PD entries with PS
+set are 1GB and 2MB pages and are treated as leaves directly.
+
+Bounded by MAX_PDE (16) to keep transfers small.
+
+Also records the two earlier wrong versions in the header, because both
+produced misleading results: treating any present entry as a leaf, and
+then following only the first one. Both read a page table rather than
+mapped content.
