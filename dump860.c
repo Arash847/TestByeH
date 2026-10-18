@@ -161,7 +161,7 @@ static uint64_t virt2phys(uint64_t addr, uint64_t *phys_limit,
 int main(void)
 {
   static uint8_t buf[DUMP_CHUNK];
-  uint64_t done, vaddr, want, phys, limit, proc, vmspace, pmap;
+  uint64_t done, vaddr, want, phys, limit, proc, vmspace;
   uint64_t pm_pml4, pm_cr3, dmap, pml;
   size_t   rc;
   int      n = 0;
@@ -185,25 +185,39 @@ int main(void)
     fflush(stdout);
     return 1;
   }
-  if (kernel_copyout(vmspace + OFF_VMSPACE_VM_PMAP, &pmap, sizeof pmap)) {
-    printf("[dump] cannot read vm_pmap\n");
-    fflush(stdout);
-    return 1;
-  }
-  if (kernel_copyout(pmap + PMAP_PML4_OFF, &pm_pml4, sizeof pm_pml4) ||
-      kernel_copyout(pmap + PMAP_CR3_OFF, &pm_cr3, sizeof pm_cr3)) {
-    printf("[dump] cannot read pmap root pointers\n");
+  /* The pmap struct sits EMBEDDED at vmspace + VM_PMAP; it is not reached
+   * through a pointer stored at that offset. Reading it as a pointer
+   * yields garbage and a non-canonical dmap (observed on console:
+   * 0x4140b0074fe800). This mirrors the SDK's kernel_find_dmap_base(),
+   * which reads vmspace + VM_PMAP + 0x20 / + 0x28 directly. */
+  if (kernel_copyout(vmspace + OFF_VMSPACE_VM_PMAP + PMAP_PML4_OFF,
+                     &pm_pml4, sizeof pm_pml4) ||
+      kernel_copyout(vmspace + OFF_VMSPACE_VM_PMAP + PMAP_CR3_OFF,
+                     &pm_cr3, sizeof pm_cr3)) {
+    printf("[dump] cannot read pmap root pointers at vmspace+0x%x\n",
+           (unsigned int)(OFF_VMSPACE_VM_PMAP + PMAP_PML4_OFF));
     fflush(stdout);
     return 1;
   }
 
-  dmap = pm_pml4 - pm_cr3;
+  /* Prefer the SDK's value, which __kernel_init() already derived with
+   * the correct walk, and keep ours as a cross-check. */
+  dmap = (uint64_t)KERNEL_ADDRESS_DMAP_BASE;
   pml  = pm_cr3;
 
   printf("[dump] pm_pml4      = 0x%lx\n", (unsigned long)pm_pml4);
   printf("[dump] pm_cr3       = 0x%lx\n", (unsigned long)pm_cr3);
-  printf("[dump] dmap         = 0x%lx\n", (unsigned long)dmap);
+  printf("[dump] pml4 - cr3   = 0x%lx (computed)\n",
+         (unsigned long)(pm_pml4 - pm_cr3));
+  printf("[dump] dmap (SDK)   = 0x%lx\n", (unsigned long)dmap);
   fflush(stdout);
+
+  if (dmap != (pm_pml4 - pm_cr3)) {
+    printf("[dump] note: computed and SDK dmap differ; using the SDK value.\n");
+    printf("[dump] that implies VM_PMAP is not 0x%x on this build.\n",
+           (unsigned int)OFF_VMSPACE_VM_PMAP);
+    fflush(stdout);
+  }
 
   if (!dmap || (dmap >> 48) != 0xFFFFULL) {
     printf("[dump] dmap is not a plausible canonical address; aborting\n");
