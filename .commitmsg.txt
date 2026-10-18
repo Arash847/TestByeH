@@ -1,14 +1,1 @@
-Scan page tables for the first mapped page instead of probing index 0
-
-The walk itself is correct: it reaches three levels with rc=0 every time,
-and lvl1/lvl2 entries are properly present (0x...63). Only lvl3 came back
-zero. The cause was in the probe, not the console: it tested page index 0
-of each table, and every 2MB region probed has page 0 unmapped. That says
-nothing about the rest of the region, and kernel text does not begin at a
-2MB boundary plus zero.
-
-This now reads each level as a whole 4KB table and finds the lowest
-present entry, reporting the virtual address and the physical address,
-then reads 64 bytes from it.
-
-Reads remain few: one PDPT, one PT per populated PDE, then the probe.
+Drop unused locals left over from the probing loop

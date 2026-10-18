@@ -109,8 +109,7 @@ int main(void)
 {
   static uint8_t pml4[4096];
   uint64_t proc, vmspace, pm_pml4, pm_cr3, dmap;
-  uint64_t km_phys, cand, leaf;
-  int      i;
+  uint64_t km_phys, leaf;
 
   diag("[ktext] locate kernel text via the real kernelmap\n");
 
