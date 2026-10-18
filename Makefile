@@ -57,9 +57,17 @@ $(PML4_0860_ELF): probe_pml4.c util.c
 
 probe-pml4: $(PML4_0860_ELF)
 
-# Without this, make applies its builtin "%: %.c" rule to the dump860
-# target, matching dump860.c, and links the source against the built ELF.
-.PHONY: dump860 all clean test probe-pml4
+# Kernel-text locator. Walks from the real kernelmap base
+# (0xFFFFFF8000000000, derived from the PML4/PDPT census) and reads the
+# first mapped physical address through the physmap.
+KTEXT_0860_ELF := byepervisor_ktext_0860.elf
+
+$(KTEXT_0860_ELF): probe_ktext.c util.c
+	$(CC) $(CFLAGS) -o $@ $(filter %.c,$^)
+
+probe-ktext: $(KTEXT_0860_ELF)
+
+.PHONY: dump860 all clean test probe-pml4 probe-ktext
 
 PAYLOAD_DIR := break_hv_payload
 PAYLOAD_HDR := $(PAYLOAD_DIR)/break_hv.h

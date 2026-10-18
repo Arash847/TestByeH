@@ -39,6 +39,9 @@ jobs:
       - name: Build PML4 census diagnostic
         run: make probe-pml4
 
+      - name: Build kernel-text locator
+        run: make probe-ktext
+
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -49,6 +52,7 @@ jobs:
             byepervisor_dump_0860.elf
             byepervisor_dump_0860_fast.elf
             byepervisor_pml4_0860.elf
+            byepervisor_ktext_0860.elf
 
   audit:
     name: Safety audit

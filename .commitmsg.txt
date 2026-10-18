@@ -1,18 +1,25 @@
-Census the next level under each populated PML4 slot
+Add a kernel-text locator built on the census result
 
-The walk trace pinned it: PML4E[511] is a valid PDPT, but PDPTE[510]
-reads back as zero. The read succeeded (rc=0); the entry is genuinely
-empty. Since KERNEL_ADDRESS_TEXT_BASE resolves to PML4 index 511 and PDPT
-index 510, 0xFFFFFFFF81000000 is NOT mapped on this firmware.
+The level census established the real kernel mapping. PML4E[511] is the
+kernelmap slot and its live PDPT indices are 0,1,2,3 and 511. Restoring
+the canonical high half that the census printout dropped:
 
-That means the SDK's text base does not hold here, and every dump range
-derived from it was pointed at nothing. It also means the earlier
-"K = 0xC70000 confirmed" result was weaker than stated: that figure came
-from DATA_BASE - TEXT_BASE of the same table, so it agreed with itself
-rather than being independently validated. The decisive test is whether
-TEXT_BASE actually maps, and it does not.
+    slot 511 sub   0 -> 0xFFFFFF8000000000   <- kernelmap base
+    slot 511 sub   1 -> 0xFFFFFF8040000000
+    slot 511 sub   2 -> 0xFFFFFF8080000000
+    slot 511 sub   3 -> 0xFFFFFF80C0000000
+    slot 511 sub 511 -> recursive window
 
-This reads the next level under each populated slot and reports the live
-sub-indices and the virtual addresses they map, so the real kernel
-mapping can be read off the console instead of guessed at. Four 4KB
-reads, all in one run.
+KERNEL_ADDRESS_TEXT_BASE, 0xFFFFFFFF81000000, resolves to PML4 index 511
+and PDPT index 510 -- and PDPTE[510] is zero. The SDK base is not mapped on
+this firmware, which is why every dump range so far pointed at nothing.
+
+That also settles what the physmap is for: XOM guards the virtual mapping
+of .text, but a whole 4KB PML4 came back through dmap with rc=0, so
+physical access is not blocked. Walking to a physical address and reading
+via the physmap is the way in.
+
+This walks from the real kernelmap base, stepping forward in 2MB if the
+first address is a hole, and reads 64 bytes at the first mapped physical
+address. Those bytes are the answer to whether kernel text can be dumped
+on 8.60 at all.
