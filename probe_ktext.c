@@ -160,7 +160,6 @@ int main(void)
   {
     static uint8_t tbl[4096];
     static const char *names[] = { "PDPT", "PD", "PT" };
-    static const int   shifts[] = { 39, 30, 21 };
     uint64_t cur = km_phys;
     int      lvl, found = 0;
 
