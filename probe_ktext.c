@@ -87,6 +87,7 @@ int main(void)
 {
   static uint8_t pml4[4096];
   static uint8_t pd[4096];
+  static uint8_t pd2[4096];
   static uint8_t pt[4096];
   static uint8_t page[64];
   uint64_t proc, vmspace, pm_pml4, pm_cr3, dmap, km_phys, leaf;
@@ -156,66 +157,84 @@ int main(void)
       continue;
 
     {
-      uint64_t pt_phys = pde & 0x000FFFFFFFFFF000ULL;
-      int      j, pte_count = 0;
+      uint64_t pd_phys = pdpe & 0x000FFFFFFFFFF000ULL;
+      int      j, pde_count = 0;
 
-      if (kernel_copyout(dmap + pt_phys, pt, sizeof pt) != 0)
+      if (kernel_copyout(dmap + pd_phys, pd2, sizeof pd2) != 0)
         continue;
 
       for (j = 0; j < 512; j++) {
         uint64_t e;
-        memcpy(&e, &pt[j * 8], sizeof e);
+        memcpy(&e, &pd2[j * 8], sizeof e);
         if (e & 1ULL)
-          pte_count++;
+          pde_count++;
       }
 
       diag("[ktext] PDPT[%d] -> PD 0x%lx : %d present PDE(s)\n",
-           i, (unsigned long)pt_phys, pte_count);
+           i, (unsigned long)pd_phys, pde_count);
 
-      /* Populated PD with an empty page table: the region is unmapped. */
-      if (!pte_count)
-        continue;
+      if (!pde_count)
+        continue;   /* populated PD, empty PT: unmapped region */
 
       tried++;
 
       for (j = 0; j < 512 && !found; j++) {
-        uint64_t pte, cand;
-        int      rc, nz = 0, b;
+        uint64_t pde, pt_phys, cand = 0;
+        int      have = 0, k;
 
-        memcpy(&pte, &pt[j * 8], sizeof pte);
-        if (!(pte & 1ULL))
+        memcpy(&pde, &pd2[j * 8], sizeof pde);
+        if (!(pde & 1ULL))
           continue;
 
-        /* A 2MB page at PD level is a leaf too. */
-        if (pte & 0x80ULL) {
-          cand = (pte & (((1ULL << 52) - (1ULL << 21)))) |
-                 ((uint64_t)j << 21);
+        if (pde & 0x80ULL) {
+          /* 2MB page: this entry is the leaf. */
+          cand = (pde & (((1ULL << 52) - (1ULL << 21)))) | ((uint64_t)j << 21);
+          have = 1;
         } else {
-          cand = (pte & 0x000FFFFFFFFFF000ULL) | (uint64_t)j;
+          /* PS clear: a POINTER to a page table. Open it and take its
+           * first present entry, which is a real 4KB page frame. */
+          pt_phys = pde & 0x000FFFFFFFFFF000ULL;
+          if (kernel_copyout(dmap + pt_phys, pt, sizeof pt) != 0)
+            continue;
+          for (k = 0; k < 512; k++) {
+            uint64_t pte;
+            memcpy(&pte, &pt[k * 8], sizeof pte);
+            if (!(pte & 1ULL))
+              continue;
+            cand = (pte & 0x000FFFFFFFFFF000ULL) | (uint64_t)k;
+            have = 1;
+            break;
+          }
         }
 
-        rc = (int)kernel_copyout(dmap + cand, page, sizeof page);
-        if (rc != 0)
-          continue;
+        if (!have)
+          continue;   /* empty page table: this 2MB region is unmapped */
 
-        for (b = 0; b < 64; b++)
-          if (page[b])
-            nz++;
-        if (!nz)
-          continue;
+        {
+          int rc = (int)kernel_copyout(dmap + cand, page, sizeof page);
+          int nz = 0, b;
 
-        leaf = cand;
-        found = 1;
-        diag("[ktext]   PDPT[%d] PDE[%d] -> phys 0x%lx\n",
-             i, j, (unsigned long)cand);
-        diag("[ktext]   VA       = 0x%lx\n",
-             (unsigned long)(KERNELMAP_BASE + ((uint64_t)i << 30) +
-                             ((uint64_t)j << 21)));
-        diag("[ktext]   content: %d/64 non-zero bytes\n", nz);
-        diag("[ktext]   first 32 bytes:");
-        for (b = 0; b < 32; b++)
-          diag(" %02x", page[b]);
-        diag("\n");
+          if (rc != 0)
+            continue;
+          for (b = 0; b < 64; b++)
+            if (page[b])
+              nz++;
+          if (!nz)
+            continue;
+
+          leaf = cand;
+          found = 1;
+          diag("[ktext]   PDPT[%d] PDE[%d] -> phys 0x%lx\n",
+               i, j, (unsigned long)cand);
+          diag("[ktext]   VA       = 0x%lx\n",
+               (unsigned long)(KERNELMAP_BASE + ((uint64_t)i << 30) +
+                               ((uint64_t)j << 21)));
+          diag("[ktext]   content: %d/64 non-zero bytes\n", nz);
+          diag("[ktext]   first 32 bytes:");
+          for (b = 0; b < 32; b++)
+            diag(" %02x", page[b]);
+          diag("\n");
+        }
       }
     }
   }

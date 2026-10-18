@@ -1,24 +1,25 @@
-Iterate populated regions instead of following only the first
+Descend through the page directory properly instead of reading the PT
 
-Console log showed the descent was correct but walked into a hole:
+The console found a page with content, but two tells showed it was not
+kernel text:
 
-    PDPT[0] = 0x0000000023150063 (PS=0)
-    PD[0]   = 0x0000000023151063 (PS=0)
-    PT has no populated entry
+    PDE[81] -> phys 0x231a2051
+    first 32 bytes: e1 00 01 00 00 00 80 21 f1 00 01 00 00 00 80 21 ...
 
-A populated PD whose page table is entirely empty is simply an unmapped
-2MB region, so following the first populated entry at each level dead-ends
-regardless of how correct the walk is. Kernel text lives elsewhere in the
-kernelmap and which region holds it is not knowable in advance.
+0x231a2051 is not page aligned, and the content is an 8-byte repeating
+array, which is a page table's entry list. So the "kernel page" was
+actually a page table read as if it were a leaf.
 
-This now iterates populated entries across the region, opens each page
-directory, counts its populated PDEs, skips regions with none, and reads
-candidate pages until one has real content. PDPT and PD entries with PS
-set are 1GB and 2MB pages and are treated as leaves directly.
+This is the same class of mistake as the previous two versions, at the
+remaining level: PS was handled at PDPT and for 2MB pages, but a PD entry
+with PS clear is a POINTER to a page table and was still being treated as
+a leaf. All three levels are now explicit:
 
-Bounded by MAX_PDE (16) to keep transfers small.
+  PDPT[i]  PS set  -> 1GB page, entry is the leaf
+           PS clear-> pointer to a PD, open it
+  PD[j]    PS set  -> 2MB page, entry is the leaf
+           PS clear-> pointer to a PT, open it
+  PT[k]    present -> 4KB page, entry is the leaf
 
-Also records the two earlier wrong versions in the header, because both
-produced misleading results: treating any present entry as a leaf, and
-then following only the first one. Both read a page table rather than
-mapped content.
+The header comment records the diagnostic signature of this failure, since
+a non page-aligned "physical" address is the quick way to catch it.
