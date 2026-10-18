@@ -41,19 +41,31 @@ removed again.
 
 ## What is established for 8.60
 
+Measured on a slim / regular 8.60 console (`fw = 0x08600004`).
+
 ```text
-ktext base   = 0xFFFFFFFF81000000
-kdata base   = 0xFFFFFFFF81C70000
-K            = 0xC70000
+dmap (direct map)  = 0xFFFF........00000000   (per-boot, verified)
+kernelmap base     = 0xFFFFFF8000000000       (PML4 slot 511, PDPT 0-3)
 ```
 
-`K` was confirmed on hardware by a read-only probe (`fw=0x08600004`, derived
-`K=0xc70000`, canonical base) and independently matches
-`ps5-payload-dev/sdk` `crt/kernel.c` `case 0x08600000`. The SDK firmware
-table and kstuff-lite agree exactly on all four branches they share
-(8.x, 9.x, 11.x, 13.60).
+**`KERNEL_ADDRESS_TEXT_BASE` is wrong for 8.60.** The SDK derives
+`0xFFFFFFFF81000000`, but that address is not mapped: it resolves to PML4
+index 511 / PDPT index 510, and `PDPTE[510]` reads back as zero. Any offset
+table anchored at the SDK's text base is anchored to an unmapped address,
+which is why the early dump attempts failed.
 
-Conversion, validated against the hardware-validated 11.60 table where all
+`K = 0xC70000` agrees with the SDK table, but that is the table agreeing
+with itself, and the text base is demonstrably wrong — so it needs
+independent confirmation before use.
+
+**The physmap works and is not XOM-blocked.** A whole 4KB PML4 reads back
+with `rc=0`, and a three-level walk resolves to correctly page-aligned
+physical addresses. XOM blocks the *virtual* mapping of `.text`
+(`copyout` on the text base returns immediately) while physical access is
+not restricted. Whether text pages specifically are blocked physically was
+not established; only page-table pages were shown to be readable.
+
+Conversion, validated on the hardware-validated 11.60 table where all
 three shared symbols reproduce exactly:
 
 ```text
@@ -64,7 +76,7 @@ ktext_offset = K + signed_kdata_offset
 0xD30000 + 0x2E04F18 = 0x3B34F18  = PMAP_STORE
 ```
 
-Applied to 8.60:
+Applied to 8.60 with `K = 0xC70000`:
 
 | Symbol | ktext offset |
 |---|---|

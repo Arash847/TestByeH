@@ -1,5 +1,27 @@
-Rename the PDPT entry variable to pdpe for clarity
+Document the measured findings and prepare maintainer reports
 
-The outer loop read the PDPT entry into a variable named pde while the
-inner block, after the three-level fix, referred to pdpe. Renaming the
-outer one makes each level's entry name distinct.
+Console result from the corrected three-level walk:
+
+    PDPT[0] -> PD 0x14ad0000 : 512 present PDE(s)
+      PDE[102] -> phys 0x5ec00000          <- page aligned: walk is correct
+      VA       = 0xffffff800cc00000
+      content: 20/64 non-zero bytes
+      first 32: 00 00 00 00 00 00 00 00 00 00 c0 0c 80 ff ff ff 00 ...
+
+The physical address is now correctly aligned, so the page-table walk
+finally works. The page found is sparse rather than code, so this is the
+first non-empty page in the region, not kernel text. Locating text from
+here means scanning thousands of pages, which is the rapid-read pattern
+that repeatedly powered off this console, so the search stops here.
+
+Also corrects the README. The earlier claim that K = 0xC70000 was
+"confirmed on hardware" was wrong: it was derived as DATA_BASE - TEXT_BASE
+from the same SDK table and then found to agree with that same table.
+KERNEL_ADDRESS_TEXT_BASE is demonstrably unmapped on 8.60, so that
+agreement proves nothing. The README now says so.
+
+docs/MAINTAINER_REPORTS.md holds two filed-ready reports for
+EchoStretch/Byepervisor-Reborn (the missing return that powers off
+unsupported firmware, and the missing offset header includes that stop it
+compiling) plus a question about 8.60 feasibility carrying the measured
+findings.
