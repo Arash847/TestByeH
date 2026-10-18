@@ -43,6 +43,7 @@
 
 #include <sys/types.h>
 #include <stdio.h>
+#include <stdarg.h>
 #include <string.h>
 #include <unistd.h>
 #include <ps5/kernel.h>
@@ -64,6 +65,40 @@
 
 #define OUT_PATH    "/data/bye860_ktext.bin"
 #define RESUME_PATH "/data/bye860_resume.txt"
+#define DIAG_PATH   "/data/bye860_diag.txt"
+
+/* Diagnostics mirror to /data: the loader's stdout is only visible if
+ * something is capturing the socket, and the on-screen notification is far
+ * too small to debug with. Several rounds were lost to that limit. */
+static FILE *g_diag;
+
+static void dopen(void)
+{
+  if (g_diag)
+    return;
+  g_diag = fopen(DIAG_PATH, "w");
+}
+
+static void diag(const char *fmt, ...)
+{
+  char buf[512];
+  va_list ap;
+
+  va_start(ap, fmt);
+  vsnprintf(buf, sizeof buf, fmt, ap);
+  va_end(ap);
+
+  fputs(buf, stdout);
+  fflush(stdout);
+
+  dopen();
+  if (g_diag) {
+    fputs(buf, g_diag);
+    fflush(g_diag);
+  }
+}
+
+static uint64_t hex2ull(const char *s)
 
 /* SDK values for the 8.x branch. */
 #define OFF_PROC_P_VMSPACE   0x200
@@ -172,22 +207,22 @@ int main(void)
   size_t   rc;
   int      n = 0;
 
-  printf("[dump] alive. dmap-mode, chunk=0x%x delay=%dus max=%d\n",
+  diag("[dump] alive. dmap-mode, chunk=0x%x delay=%dus max=%d\n",
          (unsigned int)DUMP_CHUNK, (int)DUMP_DELAY_US, (int)DUMP_MAX_READS);
   fflush(stdout);
 
   /* Discover the direct map. proc 0's pmap carries the kernel's own root
    * table and the recursive index, which together define phys 0. */
   proc = kernel_get_proc(0);
-  printf("[dump] proc(0)      = 0x%lx\n", (unsigned long)proc);
+  diag("[dump] proc(0)      = 0x%lx\n", (unsigned long)proc);
   if (!proc) {
-    printf("[dump] cannot resolve proc 0\n");
+    diag("[dump] cannot resolve proc 0\n");
     fflush(stdout);
     return 1;
   }
 
   if (kernel_copyout(proc + OFF_PROC_P_VMSPACE, &vmspace, sizeof vmspace)) {
-    printf("[dump] cannot read vmspace\n");
+    diag("[dump] cannot read vmspace\n");
     fflush(stdout);
     return 1;
   }
@@ -200,7 +235,7 @@ int main(void)
                      &pm_pml4, sizeof pm_pml4) ||
       kernel_copyout(vmspace + OFF_VMSPACE_VM_PMAP + PMAP_CR3_OFF,
                      &pm_cr3, sizeof pm_cr3)) {
-    printf("[dump] cannot read pmap root pointers at vmspace+0x%x\n",
+    diag("[dump] cannot read pmap root pointers at vmspace+0x%x\n",
            (unsigned int)(OFF_VMSPACE_VM_PMAP + PMAP_PML4_OFF));
     fflush(stdout);
     return 1;
@@ -212,52 +247,98 @@ int main(void)
   pml  = pm_cr3;
 
   if (!dmap) {
-    printf("[dump] SDK dmap is 0; falling back to pml4 - cr3\n");
+    diag("[dump] SDK dmap is 0; falling back to pml4 - cr3\n");
     dmap = pm_pml4 - pm_cr3;
   }
 
-  printf("[dump] pm_pml4      = 0x%lx\n", (unsigned long)pm_pml4);
-  printf("[dump] pm_cr3       = 0x%lx\n", (unsigned long)pm_cr3);
-  printf("[dump] pml4 - cr3   = 0x%lx (computed)\n",
+  diag("[dump] pm_pml4      = 0x%lx\n", (unsigned long)pm_pml4);
+  diag("[dump] pm_cr3       = 0x%lx\n", (unsigned long)pm_cr3);
+  diag("[dump] pml4 - cr3   = 0x%lx (computed)\n",
          (unsigned long)(pm_pml4 - pm_cr3));
-  printf("[dump] dmap         = 0x%lx\n", (unsigned long)dmap);
+  diag("[dump] dmap         = 0x%lx\n", (unsigned long)dmap);
   fflush(stdout);
 
   if (dmap != (pm_pml4 - pm_cr3)) {
-    printf("[dump] note: computed and SDK dmap differ; using the SDK value.\n");
-    printf("[dump] that implies VM_PMAP is not 0x%x on this build.\n",
+    diag("[dump] note: computed and SDK dmap differ; using the SDK value.\n");
+    diag("[dump] that implies VM_PMAP is not 0x%x on this build.\n",
            (unsigned int)OFF_VMSPACE_VM_PMAP);
     fflush(stdout);
   }
 
   if (!dmap || (dmap >> 48) != 0xFFFFULL) {
-    printf("[dump] dmap is not a plausible canonical address; aborting\n");
+    diag("[dump] dmap is not a plausible canonical address; aborting\n");
     fflush(stdout);
     notifyf("[8.60 dump] FAILED\ndmap=0x%lx implausible", (unsigned long)dmap);
     return 1;
   }
 
-  /* Sanity-check the walk on the first page of kernel text before
-   * writing anything. */
-  phys  = virt2phys(KTEXT_BASE, &limit, dmap, pml);
-  printf("[dump] ktext[0] -> phys 0x%lx (mapping ends 0x%lx)\n",
-         (unsigned long)phys, (unsigned long)limit);
-  fflush(stdout);
+  /* The walk needs the correct root PML4. Rather than guess again, try
+   * every plausible candidate in one run and report which one translates
+   * kernel text, so a single console run answers the question instead of
+   * costing one run per hypothesis. */
+  {
+    static const char *names[] = { "pm_cr3", "pml4u", "phys0", "proc1_cr3" };
+    uint64_t roots[4];
+    int r;
 
-  if (phys == (uint64_t)-1) {
-    printf("[dump] page walk failed for ktext base; aborting before any write\n");
-    fflush(stdout);
-    notifyf("[8.60 dump] FAILED\npage walk failed\nno file written");
-    return 1;
+    roots[0] = pm_cr3;
+    roots[1] = pm_pml4;
+    roots[2] = 0;
+    roots[3] = 0;
+    {
+      uint64_t p1  = kernel_get_proc(1);
+      uint64_t v1  = 0, cr31 = 0;
+      if (p1 && !kernel_copyout(p1 + OFF_PROC_P_VMSPACE, &v1, sizeof v1) &&
+          !kernel_copyout(v1 + OFF_VMSPACE_VM_PMAP + PMAP_CR3_OFF,
+                          &cr31, sizeof cr31))
+        roots[3] = cr31;
+    }
+
+    diag("[dump] dmap = 0x%lx, trying %d roots\n", (unsigned long)dmap, 4);
+
+    phys = (uint64_t)-1;
+    pml  = roots[0];
+
+    for (r = 0; r < 4; r++) {
+      uint64_t cand = roots[r];
+      uint64_t p, lim = 0;
+
+      if (!cand) {
+        diag("[dump]   root %-8s unavailable\n", names[r]);
+        continue;
+      }
+
+      p = virt2phys(KTEXT_BASE, &lim, dmap, cand);
+      diag("[dump]   root %-8s 0x%016lx -> %s", names[r],
+           (unsigned long)cand,
+           (p == (uint64_t)-1) ? "walk failed\n" : "TRANSLATES\n");
+
+      if (p != (uint64_t)-1) {
+        diag("[dump]   -> phys 0x%lx, mapping ends 0x%lx\n",
+             (unsigned long)p, (unsigned long)lim);
+        phys  = p;
+        limit = lim;
+        pml   = cand;
+        break;
+      }
+    }
+
+    if (phys == (uint64_t)-1) {
+      diag("[dump] no root translated ktext; see %s\n", DIAG_PATH);
+      notifyf("[8.60 dump] walk failed\nno root worked\nsee bye860_diag.txt");
+      return 1;
+    }
+
+    diag("[dump] using root 0x%lx\n", (unsigned long)pml);
   }
 
   done = load_resume();
-  printf("[dump] resuming at 0x%llx (%.2f%%)\n", (unsigned long long)done,
+  diag("[dump] resuming at 0x%llx (%.2f%%)\n", (unsigned long long)done,
          100.0 * (double)done / (double)KTEXT_SIZE);
   fflush(stdout);
 
   if (done >= KTEXT_SIZE) {
-    printf("[dump] already complete\n");
+    diag("[dump] already complete\n");
     fflush(stdout);
     notifyf("[8.60 dump]\ncomplete");
     return 0;
@@ -266,12 +347,12 @@ int main(void)
   {
     FILE *out = fopen(OUT_PATH, done ? "r+b" : "wb");
     if (!out) {
-      printf("[dump] cannot open %s\n", OUT_PATH);
+      diag("[dump] cannot open %s\n", OUT_PATH);
       fflush(stdout);
       return 1;
     }
     if (done && fseek(out, (long)done, SEEK_SET) != 0) {
-      printf("[dump] cannot seek to 0x%llx; delete %s and %s to restart\n",
+      diag("[dump] cannot seek to 0x%llx; delete %s and %s to restart\n",
              (unsigned long long)done, OUT_PATH, RESUME_PATH);
       fclose(out);
       return 1;
@@ -288,7 +369,7 @@ int main(void)
       limit = 0;
       phys  = virt2phys(vaddr, &limit, dmap, pml);
       if (phys == (uint64_t)-1) {
-        printf("[dump] unmapped at offset 0x%llx (vaddr 0x%lx); stopping\n",
+        diag("[dump] unmapped at offset 0x%llx (vaddr 0x%lx); stopping\n",
                (unsigned long long)done, (unsigned long)vaddr);
         fflush(out);
         fclose(out);
@@ -301,7 +382,7 @@ int main(void)
       if (limit && (phys + want) > limit)
         want = limit - phys;
       if (!want) {
-        printf("[dump] zero-length mapping at 0x%llx\n", (unsigned long long)done);
+        diag("[dump] zero-length mapping at 0x%llx\n", (unsigned long long)done);
         fclose(out);
         save_resume(done);
         return 2;
@@ -309,7 +390,7 @@ int main(void)
 
       rc = (size_t)kernel_copyout(dmap + phys, buf, (size_t)want);
       if (rc != want) {
-        printf("[dump] copyout failed at offset 0x%llx (phys 0x%lx, rc %zu)\n",
+        diag("[dump] copyout failed at offset 0x%llx (phys 0x%lx, rc %zu)\n",
                (unsigned long long)done, (unsigned long)phys, rc);
         fflush(out);
         fclose(out);
@@ -319,7 +400,7 @@ int main(void)
       }
 
       if (fwrite(buf, 1, want, out) != want) {
-        printf("[dump] short write at 0x%llx\n", (unsigned long long)done);
+        diag("[dump] short write at 0x%llx\n", (unsigned long long)done);
         fflush(out);
         fclose(out);
         save_resume(done);
@@ -333,7 +414,7 @@ int main(void)
       save_resume(done);
       n++;
 
-      printf("[dump] +%llu -> 0x%llx (%.2f%%)\n",
+      diag("[dump] +%llu -> 0x%llx (%.2f%%)\n",
              (unsigned long long)want, (unsigned long long)done,
              100.0 * (double)done / (double)KTEXT_SIZE);
       fflush(stdout);
@@ -344,14 +425,14 @@ int main(void)
   }
 
   if (done >= KTEXT_SIZE) {
-    printf("[dump] COMPLETE: %llu bytes in %s\n",
+    diag("[dump] COMPLETE: %llu bytes in %s\n",
            (unsigned long long)KTEXT_SIZE, OUT_PATH);
     fflush(stdout);
     notifyf("[8.60 dump] COMPLETE\n%llu bytes", (unsigned long long)KTEXT_SIZE);
     return 0;
   }
 
-  printf("[dump] %d reads this run, at 0x%llx. Rerun to resume.\n",
+  diag("[dump] %d reads this run, at 0x%llx. Rerun to resume.\n",
          n, (unsigned long long)done);
   fflush(stdout);
   notifyf("[8.60 dump] %.1f%%\nrerun to resume",
