@@ -1,18 +1,18 @@
-Trace every level of the page walk instead of reporting pass/fail
+Census the next level under each populated PML4 slot
 
-Physmap reads are not XOM blocked: the whole 4KB PML4 came back with
-rc=0, and the decoded table is coherent.
+The walk trace pinned it: PML4E[511] is a valid PDPT, but PDPTE[510]
+reads back as zero. The read succeeded (rc=0); the entry is genuinely
+empty. Since KERNEL_ADDRESS_TEXT_BASE resolves to PML4 index 511 and PDPT
+index 510, 0xFFFFFFFF81000000 is NOT mapped on this firmware.
 
-    [  0] -> 0x243f3000  PW
-    [282] -> 0x230a0000  PW  PS (1GB page)
-    [367] -> 0x24208000  PW   <- this is pm_cr3, the recursive map
-    [511] -> 0x230b5000  PW   <- kernelmap, which kernel text lives behind
+That means the SDK's text base does not hold here, and every dump range
+derived from it was pointed at nothing. It also means the earlier
+"K = 0xC70000 confirmed" result was weaker than stated: that figure came
+from DATA_BASE - TEXT_BASE of the same table, so it agreed with itself
+rather than being independently validated. The decisive test is whether
+TEXT_BASE actually maps, and it does not.
 
-Entry 511 is present and points onward, so the walk should proceed. The
-dumper reported only "walk failed", with no indication of which level,
-which is why several rounds went into guessing. This logs the table base,
-index, read address, entry and flags for every level, and stops at the
-first failure with the reason.
-
-It also attempts a 16-byte text read once the leaf is reached, so a
-successful walk is immediately confirmed by the bytes.
+This reads the next level under each populated slot and reports the live
+sub-indices and the virtual addresses they map, so the real kernel
+mapping can be read off the console instead of guessed at. Four 4KB
+reads, all in one run.

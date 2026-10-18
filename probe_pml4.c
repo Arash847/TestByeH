@@ -210,7 +210,78 @@ int main(void)
     }
   }
 
+  /* ---- level census ------------------------------------------------
+   * The trace shows PML4E[511] is a valid PDPT but PDPTE[510] is zero:
+   * KERNEL_ADDRESS_TEXT_BASE (0xFFFFFFFF81000000) is NOT mapped. The read
+   * itself succeeded (rc=0), the entry is genuinely empty. So the SDK's
+   * text base does not hold on this firmware, and every dump range built
+   * from it was wrong.
+   *
+   * Rather than guess again, read the next level under each populated
+   * PML4 slot and report which sub-indices are live. That yields the real
+   * kernel mapping. Four 4KB reads, all in one run. */
+  diag("\n[pml4] --- level-1 census under each populated slot ---\n");
+  {
+    int s;
+    for (s = 0; s < 512; s++) {
+      uint64_t pe;
+      int live = 0, b;
+      static uint8_t lvl1[4096];
+
+      memcpy(&pe, &pml4[s * 8], sizeof pe);
+      if (!(pe & 1ULL))
+        continue;
+
+      if (pe & 0x80ULL) {
+        diag("[pml4] slot %3d -> phys 0x%lx  (1GB page, no next level)\n",
+             s, (unsigned long)(pe & 0x000FFFFFFFFFF000ULL));
+        continue;
+      }
+
+      if (kernel_copyout(dmap + (pe & 0x000FFFFFFFFFF000ULL), lvl1,
+                         sizeof lvl1) != 0) {
+        diag("[pml4] slot %3d -> phys 0x%lx  (level-1 READ FAILED)\n",
+             s, (unsigned long)(pe & 0x000FFFFFFFFFF000ULL));
+        continue;
+      }
+
+      {
+        char name[64];
+        FILE *f;
+        snprintf(name, sizeof name, "/data/bye860_l1_%d.bin", s);
+        f = fopen(name, "wb");
+        if (f) {
+          fwrite(lvl1, 1, sizeof lvl1, f);
+          fflush(f);
+          fclose(f);
+        }
+      }
+
+      for (b = 0; b < 512; b++) {
+        uint64_t e2;
+        memcpy(&e2, &lvl1[b * 8], sizeof e2);
+        if (e2 & 1ULL)
+          live++;
+      }
+
+      diag("[pml4] slot %3d -> phys 0x%lx : %d live -> bye860_l1_%d.bin\n",
+           s, (unsigned long)(pe & 0x000FFFFFFFFFF000ULL), live, s);
+
+      for (b = 0; b < 512; b++) {
+        uint64_t e2, phys;
+        memcpy(&e2, &lvl1[b * 8], sizeof e2);
+        if (!(e2 & 1ULL))
+          continue;
+        phys = e2 & 0x000FFFFFFFFFF000ULL;
+        diag("[pml4]    sub[%3d] phys=0x%012lx PS=%d va~0x%lx\n",
+             b, (unsigned long)phys, (int)((e2 >> 7) & 1),
+             (unsigned long)(((uint64_t)s << 39) | ((uint64_t)b << 30)));
+      }
+    }
+  }
+
   notifyf("[pml4] census done\n%lu slots present\nroot=0x%lx",
           (unsigned long)present, (unsigned long)pm_cr3);
   return 0;
 }
+
