@@ -47,6 +47,13 @@ $(DUMP_0860_ELF): dump860.c util.c
 
 dump860: $(DUMP_0860_ELF)
 
+# Without this, make applies its builtin "%: %.c" rule to the target
+# `dump860`, matching dump860.c, and tries to link the source against the
+# already-built ELF. Result: "undefined symbol" from a bogus second
+# compile, which is not the payload failing but make building the wrong
+# thing.
+.PHONY: dump860 all clean test
+
 PAYLOAD_DIR := break_hv_payload
 PAYLOAD_HDR := $(PAYLOAD_DIR)/break_hv.h
 

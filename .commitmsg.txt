@@ -1,26 +1,12 @@
-Add a resumable 8.60 kernel .text dumper
+Fix make implicit-rule collision on the dump860 target
 
-Custom kernel reads on this console have already proven workable: a paced
-scan read successfully past kdata+0x2885d50. What caused shutdowns was
-issuing reads back to back with no checkpoint. This payload is built
-around that observation rather than around the idea of one clean run:
+Target `dump860` was matching make's builtin "%: %.c" rule against
+dump860.c, so after the real build succeeded make ran a second, bogus
+compile that tried to link the source with the already-built ELF:
 
- - every chunk is written to /data and fsync'd BEFORE the next read, so
-   the file on disk is always a valid prefix
- - a resume offset is recorded after each chunk, so a power cycle costs
-   at most one chunk rather than the whole run
- - reads are paced with a settle delay, matching the only pattern
-   observed to survive
- - each run performs a bounded number of reads and then exits cleanly
+  prospero-clang ... dump860.c byepervisor_dump_0860.elf -o dump860
+  ld.lld: error: undefined symbol: notifyf
 
-kernel_copyout is called directly rather than through util.c kread, which
-still discards its return value upstream, so a failed read is detected
-and leaves the resume offset unchanged instead of silently writing
-garbage.
-
-Files on console: /data/bye860_ktext.bin and /data/bye860_resume.txt.
-Delete both to restart from zero.
-
-Two variants: conservative 4KB chunks / 24 reads per run, and a fast
-16KB / 96-read build. They emit distinct filenames so CI can ship both.
-Start with the conservative one.
+That "undefined symbol" came from make building the wrong target, not
+from the payload. Declaring the targets phony stops the implicit rule
+from applying.
