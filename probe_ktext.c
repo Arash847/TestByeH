@@ -145,63 +145,69 @@ int main(void)
          (unsigned long long)e511, (unsigned long)km_phys);
   }
 
-  /* Scanning beats probing one index.
+  /* Descend properly, all the way to a real PTE.
    *
-   * The walk reaches three levels cleanly; PT[0] is simply a hole. Every
-   * 2MB region probed had page index 0 unmapped, which says nothing about
-   * the rest of the region -- kernel text does not begin at a 2MB
-   * boundary plus zero. So read each level as a whole table (one 4KB
-   * read) and find the lowest PRESENT entry, then read what is there. */
-  diag("[ktext] --- scanning kernelmap for the first mapped page ---\n");
+   * The previous version stopped one level short and treated a page
+   * DIRECTORY entry as a leaf, which returned 64 zero bytes: it had read
+   * the next-level page TABLE, and page tables begin with a run of zero
+   * entries. The giveaway is the PS bit. A value ending 0x63 has PS
+   * clear, so it is a POINTER to the next level, not a leaf. PS set means
+   * a large page, and that entry IS the leaf.
+   *
+   * So descend PDPT -> PD -> PT, checking PS at each step and stopping
+   * only when PS is set or the final level is reached. */
+  diag("[ktext] --- descending to a real PTE ---\n");
   {
-    static uint8_t pd[4096], pt[4096];
-    int i, found = 0;
+    static uint8_t tbl[4096];
+    static const char *names[] = { "PDPT", "PD", "PT" };
+    static const int   shifts[] = { 39, 30, 21 };
+    uint64_t cur = km_phys;
+    int      lvl, found = 0;
 
-    if (kernel_copyout(dmap + km_phys, pd, sizeof pd) != 0) {
-      diag("[ktext] cannot read PDPT at 0x%lx\n", (unsigned long)km_phys);
-      return 2;
-    }
+    for (lvl = 0; lvl < 3 && !found; lvl++) {
+      int i, descended = 0;
 
-    for (i = 0; i < 512 && !found; i++) {
-      uint64_t pde;
-      memcpy(&pde, &pd[i * 8], sizeof pde);
-      if (!(pde & 1ULL))
-        continue;
-
-      if (pde & 0x80ULL) {
-        leaf = (pde & (((1ULL << 52) - (1ULL << 21)))) | ((uint64_t)i << 21);
-        diag("[ktext] PDPT[%d] is a 2MB page -> phys 0x%lx\n",
-             i, (unsigned long)leaf);
-        found = 1;
+      if (kernel_copyout(dmap + cur, tbl, sizeof tbl) != 0) {
+        diag("[ktext] cannot read %s at 0x%lx\n", names[lvl],
+             (unsigned long)cur);
         break;
       }
 
-      {
-        uint64_t pt_phys = pde & 0x000FFFFFFFFFF000ULL;
-        int j;
-        if (kernel_copyout(dmap + pt_phys, pt, sizeof pt) != 0)
+      for (i = 0; i < 512; i++) {
+        uint64_t e;
+        memcpy(&e, &tbl[i * 8], sizeof e);
+        if (!(e & 1ULL))
           continue;
-        for (j = 0; j < 512; j++) {
-          uint64_t pte;
-          memcpy(&pte, &pt[j * 8], sizeof pte);
-          if (!(pte & 1ULL))
-            continue;
-          leaf = (pte & 0x000FFFFFFFFFF000ULL) | (uint64_t)j;
-          diag("[ktext] PDPT[%d] -> PT 0x%lx, first present PTE[%d]\n",
-               i, (unsigned long)pt_phys, j);
-          diag("[ktext]   VA   = 0x%lx\n",
-               (unsigned long)(KERNELMAP_BASE + ((uint64_t)i << 30) +
-                               ((uint64_t)j << 12)));
-          diag("[ktext]   phys = 0x%lx\n", (unsigned long)leaf);
+
+        diag("[ktext] %s[%d] = 0x%016llx (PS=%d)\n", names[lvl], i,
+             (unsigned long long)e, (int)((e >> 7) & 1));
+
+        if ((e & 0x80ULL) || lvl == 2) {
+          uint64_t base;
+          if (lvl == 0)
+            base = (e & (((1ULL << 52) - (1ULL << 39)))) | ((uint64_t)i << 39);
+          else if (lvl == 1)
+            base = (e & (((1ULL << 52) - (1ULL << 30)))) | ((uint64_t)i << 30);
+          else
+            base = (e & 0x000FFFFFFFFFF000ULL) | (uint64_t)i;
+          leaf = base;
           found = 1;
+          diag("[ktext]   LEAF phys = 0x%lx\n", (unsigned long)leaf);
           break;
         }
+
+        cur = e & 0x000FFFFFFFFFF000ULL;
+        descended = 1;
+        break;   /* follow the first populated entry down one level */
       }
+
+      if (!descended && !found)
+        diag("[ktext] %s has no populated entry\n", names[lvl]);
     }
 
     if (!found) {
-      diag("[ktext] no present leaf in the first 1GB of kernelmap\n");
-      notifyf("[ktext] no mapped page\nin first 1GB of kernelmap");
+      diag("[ktext] no populated leaf found descending the kernelmap\n");
+      notifyf("[ktext] no leaf found\ndescending kernelmap");
       return 2;
     }
   }

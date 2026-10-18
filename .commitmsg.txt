@@ -1,1 +1,17 @@
-Drop unused locals left over from the probing loop
+Descend to a real PTE; the previous scan stopped a level short
+
+The 64 zero bytes were my bug, not an XOM verdict. The chain was:
+
+    PML4E[511] -> 0x230b5000   PDPT
+    PDPT[0]    -> 0x23150063   PS=0, a POINTER to the PD
+    "PTE[0]"   -> 0x23151000   actually the PT address, not a frame
+
+The scan treated a page-directory entry as a leaf and therefore read the
+next-level page table. Page tables start with a run of zero entries,
+which is exactly what came back, so the all-zero result said nothing
+about kernel text.
+
+The giveaway is the PS bit: a value ending 0x63 has PS clear, meaning it
+points at the next level rather than being a leaf. This now walks
+PDPT -> PD -> PT, checks PS at each step, and only treats an entry as a
+leaf when PS is set or the final level is reached.
