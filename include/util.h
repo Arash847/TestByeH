@@ -30,10 +30,4 @@ void notifyf(const char *fmt, ...);
 void klog(const char *fmt, ...);
 void kHexDump(uint64_t kaddr, uint64_t len);
 
-/* Write a line to both stdout (relayed to the connected loader) and to
- * a log file on console storage. The file is flushed immediately, so it
- * survives a hard power-off and does not depend on the host connection. */
-void logf(const char *fmt, ...);
-const char *log_path(void);
-
 #endif // CPU_H

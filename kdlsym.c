@@ -5,7 +5,6 @@
 #include "kdlsym.h"
 
 #include "offsets/8_60.h"
-#include "offsets/11_60.h"
 #include "offsets/13_00.h"
 #include "offsets/13_20.h"
 #include "offsets/13_60.h"
@@ -13,11 +12,9 @@
 uint64_t g_fw_version;
 uint64_t g_kernel_base = 0;
 
-/* The 8.60 offset table ships empty on purpose (see include/offsets/8_60.h).
- * Until it is both derived and hardware-validated, refuse to hand out
- * addresses rather than returning ktext(0) and letting the chain jump to
- * the base of kernel text. A NULL here is a clean refusal the callers
- * already handle; a bogus pointer is a bricked console. */
+/* The 8.60 table ships incomplete (see include/offsets/8_60.h). Refuse to
+ * hand out addresses while it is unready rather than returning ktext(0),
+ * which would aim the chain at the base of kernel text. */
 static int fw_0860_ready(void)
 {
   return G_SYM_MAP_0860_READY && G_GADGET_MAP_0860_READY;
@@ -39,14 +36,28 @@ uint64_t kgadget(kgadget_t gadget)
     if (!fw_0860_ready())
       return 0;
     return ktext(g_gadget_map_0860[gadget]);
-  case 0x11600000:
-    return ktext(g_gadget_map_1160[gadget]);
+  case 0x12000000:
+    return ktext(g_gadget_map_1200[gadget]);
+  case 0x12020000:
+    return ktext(g_gadget_map_1202[gadget]);
+  case 0x12200000:
+    return ktext(g_gadget_map_1220[gadget]);
+  case 0x12400000:
+    return ktext(g_gadget_map_1240[gadget]);
+  case 0x12600000:
+    return ktext(g_gadget_map_1260[gadget]);
+  case 0x12700000:
+    return ktext(g_gadget_map_1270[gadget]);
   case 0x13000000:
     return ktext(g_gadget_map_1300[gadget]);
   case 0x13200000:
     return ktext(g_gadget_map_1320[gadget]);
+  case 0x13400000:
+    return ktext(g_gadget_map_1340[gadget]);
+  case 0x13420000:
+    return ktext(g_gadget_map_1342[gadget]);
   case 0x13600000:
-    return ktext(g_gadget_map_1360[gadget]);    
+    return ktext(g_gadget_map_1360[gadget]);
   default:
     return 0;
   }
@@ -63,14 +74,28 @@ uint64_t kdlsym(ksym_t sym)
     if (!fw_0860_ready())
       return 0;
     return ktext(g_sym_map_0860[sym]);
-  case 0x11600000:
-    return ktext(g_sym_map_1160[sym]);
+  case 0x12000000:
+    return ktext(g_sym_map_1200[sym]);
+  case 0x12020000:
+    return ktext(g_sym_map_1202[sym]);
+  case 0x12200000:
+    return ktext(g_sym_map_1220[sym]);
+  case 0x12400000:
+    return ktext(g_sym_map_1240[sym]);
+  case 0x12600000:
+    return ktext(g_sym_map_1260[sym]);
+  case 0x12700000:
+    return ktext(g_sym_map_1270[sym]);
   case 0x13000000:
     return ktext(g_sym_map_1300[sym]);
   case 0x13200000:
     return ktext(g_sym_map_1320[sym]);
+  case 0x13400000:
+    return ktext(g_sym_map_1340[sym]);
+  case 0x13420000:
+    return ktext(g_sym_map_1342[sym]);
   case 0x13600000:
-    return ktext(g_sym_map_1360[sym]);    
+    return ktext(g_sym_map_1360[sym]);
   default:
     return 0;
   }
@@ -87,14 +112,28 @@ uint64_t rawoff(ksym_t sym)
     if (!fw_0860_ready())
       return 0;
     return g_sym_map_0860[sym];
-  case 0x11600000:
-    return g_sym_map_1160[sym];
+  case 0x12000000:
+    return g_sym_map_1200[sym];
+  case 0x12020000:
+    return g_sym_map_1202[sym];
+  case 0x12200000:
+    return g_sym_map_1220[sym];
+  case 0x12400000:
+    return g_sym_map_1240[sym];
+  case 0x12600000:
+    return g_sym_map_1260[sym];
+  case 0x12700000:
+    return g_sym_map_1270[sym];
   case 0x13000000:
     return g_sym_map_1300[sym];
   case 0x13200000:
     return g_sym_map_1320[sym];
+  case 0x13400000:
+    return g_sym_map_1340[sym];
+  case 0x13420000:
+    return g_sym_map_1342[sym];
   case 0x13600000:
-    return g_sym_map_1360[sym];    
+    return g_sym_map_1360[sym];
   default:
     return 0;
   }

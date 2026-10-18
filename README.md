@@ -1,96 +1,109 @@
-# Byepervisor Reborn — 8.60 port (slim / regular model)
+# Byepervisor Reborn — 8.60 port (slim / regular)
 
-Work-in-progress port of [PS5Dev/Byepervisor-Reborn](https://github.com/PS5Dev/Byepervisor-Reborn)
-to firmware **8.60** on a **slim (regular-model)** console, based on the
-11.60 fork [gzimbric/Byepervisor-Reborn](https://github.com/gzimbric/Byepervisor-Reborn).
+Work-in-progress port of
+[EchoStretch/Byepervisor-Reborn](https://github.com/EchoStretch/Byepervisor-Reborn)
+(`768e8a1`, the 12.xx–13.xx build with auto rest mode) to firmware **8.60**
+on a **slim / regular-model** console.
+
+Base note: this started life on the gzimbric 11.60 fork, but EchoStretch's
+tree is the better base — newer, covers 12.xx–13.xx properly, and has the
+auto rest-mode behaviour. The port was rebased onto it.
 
 ## Status: NOT runnable on 8.60
 
-The 8.60 offset table is intentionally empty and the build **refuses to
-emit a chain** while it is unvalidated. There is no supported 8.60 exploit
-here yet. The one thing this tree can actually do today is build and run a
-read-only diagnostic.
+The 8.60 offset table is incomplete and the payload **refuses to run**
+until it is finished. Nothing in this repo should be loaded on 8.60 yet.
 
 | Component | State |
 |---|---|
-| Structural port (firmware dispatch, VMCB routing, fail-closed guard) | done |
-| 8.60 offset table | **empty — blocking** |
-| Read-only stage-0 probe | buildable, unvalidated on hardware |
+| Structural port (firmware dispatch, fail-closed guard) | done |
+| 8.60 data symbols (IDT / TSS / pmap) | derived, formula-proven |
+| 8.60 text symbols (4 data + 5 text + 15 of 21 gadgets) | **missing** |
 
-## Why the table is empty
+## Why this matters for your console
 
-Every firmware build relocates every kernel function, so 8.60 symbol and
-gadget offsets are not derivable from 11.60 or 13.60. A wrong offset here
-does not fail gracefully: the payload writes kernel memory, redirects
-IDT/IST gates on all 16 cores, and clears `NP_ENABLE` across hypervisor
-VMCBs during S3 resume. A plausible-looking wrong value means a hung or
-bricked console with no useful diagnostic.
+Upstream's unsupported-firmware path was missing a `return 1`:
 
-`kdlsym.c` therefore returns NULL for 8.60 until
-`G_SYM_MAP_0860_READY` and `G_GADGET_MAP_0860_READY` are both set, which
-`main.c` already treats as "unsupported firmware".
+```c
+if (kdlsym(KERNEL_SYM_HV_MP_STARTUP_CALL) == 0) {
+    printf("[!] Undetected firmware, exiting!\n");
+    notifyf("[ERROR] ...Firmware is not supported :(\n");
+}                       /* no return -- falls through */
+```
 
-## What is known for 8.60
+So on an unsupported firmware it warned and then **ran the exploit anyway**
+with a NULL hook target, entered rest mode, and hard power-offed the
+console — which is the exact failure the upstream README describes for a
+failed exploit. That is what happens on 8.60 with an unmodified build.
 
-Target model is slim/regular, so `HV_LOADER_PA_REGULAR = 0x062800000`.
-The PS5 Pro path is refused until its physical layout is surveyed.
+Fixed here, and CI (`audit` job) fails the build if the `return` is ever
+removed again.
 
-kstuff-lite provides a kdata-relative 8.x anchor table (shared across the
-8.00/8.20/8.40/8.60 kernel branch). The conversion to Byepervisor's
-ktext-relative form was verified against the hardware-validated 11.60
-tables, where three independent symbols all yield `K = 0xD30000`:
+## What is established for 8.60
+
+```text
+ktext base   = 0xFFFFFFFF81000000
+kdata base   = 0xFFFFFFFF81C70000
+K            = 0xC70000
+```
+
+`K` was confirmed on hardware by a read-only probe (`fw=0x08600004`, derived
+`K=0xc70000`, canonical base) and independently matches
+`ps5-payload-dev/sdk` `crt/kernel.c` `case 0x08600000`. The SDK firmware
+table and kstuff-lite agree exactly on all four branches they share
+(8.x, 9.x, 11.x, 13.60).
+
+Conversion, validated against the hardware-validated 11.60 table where all
+three shared symbols reproduce exactly:
 
 ```text
 ktext_offset = K + signed_kdata_offset
-K = kdata_base - ktext_base
+
+0xD30000 + 0x2E70300 = 0x3BA0300  = IDT_ARRAY
+0xD30000 + 0x2E72FE0 = 0x3BA2FE0  = COMMON_TSS
+0xD30000 + 0x2E04F18 = 0x3B34F18  = PMAP_STORE
 ```
 
-`K` is not interpolable and must be measured on 8.60:
+Applied to 8.60:
 
-```text
-K(9.60)  = 0xCA0000
-K(13.60) = 0xCC0000
-K(11.60) = 0xD30000
-```
+| Symbol | ktext offset |
+|---|---|
+| `KERNEL_SYM_PMAP_STORE` | `0x3AB8848` |
+| `KERNEL_SYM_IDT_ARRAY` | `0x3B23DF0` |
+| `KERNEL_SYM_COMMON_TSS` | `0x3B26AD0` |
 
-## Stage 0: the diagnostic
+## What is still missing
 
-`probe_0860.c` measures `K` from two fully independent anchors — the CPU
-IDT and GDT descriptor-table registers — because two independent anchors
-must agree before any offset is believed:
+Four data symbols (`DMPML4I`, `DMPDPI`, `PML4PML4I`, `DATA_CAVE`), all five
+text symbols (`SYS_GETUID`, `PRINTF`, `ACPI_SLEEP_MACHDEP_HOOK`,
+`HV_MP_STARTUP_CALL`, `MP_STARTUP_INIT_VECTOR`), and 15 of 21 gadgets.
 
-```text
-K_idt = (IDTR.base - ktext_base) - 0x2EB3DF0
-K_gdt = (GDTR.base - ktext_base) - 0x2EB50D0
-```
+No public 8.60 source provides these. Deriving them needs a trusted 8.60
+kernel `.text` image. Do not copy them from 12.x/13.x — every firmware
+build relocates every function, and a wrong offset here writes kernel
+memory and redirects IDT/IST gates on all 16 cores.
 
-It then validates the result independently by walking all 256 IDT gates
-for present/64-bit/selector-`0x08` entries whose handlers point back into
-kernel text, and reports whether kernel text is readable.
+Two things to expect once offsets exist, per the porting guide:
 
-8.60 predates enforced XOM, so readable ktext is expected. If so, a text
-dump plus `K` is sufficient to derive the remaining 9 symbols and 15
-gadgets offline with the
-[porting guide](https://github.com/gzimbric/ps5-hv-bypass-porting) tools.
+- 8.60 is assumed to lack a usable `pop r8`, so the chain should use the
+  portable `pop rcx / pop rax / mov [rcx],rax` store
+- the 13.x hypervisor heap/PCPU globals read as zero in the startup AP
+  window on 11.60, so 8.60 should use runtime VMCB discovery rather than
+  the fixed globals
 
-The probe is **read-only**: it writes nothing to kernel memory, installs
-no gate, touches no IST entry, does not enter rest mode, and does not
-access hypervisor physical memory.
+## Getting a dump
 
-## Build
+See [`docs/PROSPER0GDB.md`](docs/PROSPER0GDB.md). Network tooling lives in
+`scan-ports.ps1`, `r0gdb-dump.ps1` and `send-capture.ps1`.
 
-```sh
-export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk
-make probe-0860    # byepervisor_probe_0860.elf
-```
-
-Send `byepervisor_probe_0860.elf` through
-[elfldr](https://github.com/ps5-payload-dev/elfldr). GitHub Actions builds
-this on every push.
+Note: prosper0gdb needs `-DDEBUG` to bring its stub up, and the stub only
+services packets from inside a trap. `-DINTERRUPTER_THREAD` was tried and
+**regressed startup** — the stub port stopped opening entirely.
 
 ## Credits
 
-- [PS5Dev/Byepervisor-Reborn](https://github.com/PS5Dev/Byepervisor-Reborn) — base exploit
-- [gzimbric/Byepervisor-Reborn](https://github.com/gzimbric/Byepervisor-Reborn) — 11.60 fork, starting point
-- [EchoStretch/kstuff-lite](https://github.com/EchoStretch/kstuff-lite) — 8.x anchor table
-- [gzimbric/ps5-hv-bypass-porting](https://github.com/gzimbric/ps5-hv-bypass-porting) — porting workflow
+- [EchoStretch/Byepervisor-Reborn](https://github.com/EchoStretch/Byepervisor-Reborn) — base
+- [EchoStretch/kstuff-lite](https://github.com/EchoStretch/kstuff-lite) — 8.x anchors
+- [PS5Dev/Byepervisor-Reborn](https://github.com/PS5Dev/Byepervisor-Reborn) — original
+- [gzimbric/Byepervisor-Reborn](https://github.com/gzimbric/Byepervisor-Reborn) — 11.60 port, prior base
+- [gzimbric/ps5-hv-bypass-porting](https://github.com/gzimbric/ps5-hv-bypass-porting) — workflow

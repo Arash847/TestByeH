@@ -1,15 +1,36 @@
-Revert -DINTERRUPTER_THREAD: enabling it regresses kstuff startup
+Rebase the 8.60 port onto EchoStretch/Byepervisor-Reborn
 
-Measured on the console: with -DDEBUG -DINTERRUPTER_THREAD the stub port
-stopped opening entirely. 9021 was open (elfldr healthy) but nothing was
-listening on 1234-1280, which is worse than the -DDEBUG-only build where
-1234 did open.
+The previous base was gzimbric's 11.60 fork. EchoStretch's tree is a
+better base: newer, covers 12.xx-13.xx properly, and has auto rest mode.
+This also drops the issue9 diagnostic cruft inherited from the old fork.
 
-start_interrupter_thread() is invoked before the listening socket is
-bound, so its select() operates on an uninitialised gdb_socket and
-startup fails before accept() ever runs. The hypothesis that the missing
-interrupter thread was the reason packets went unserviced was wrong, or at
-least enabling it is not the way to fix that.
+Fixes an upstream bug that power-offed the console on unsupported
+firmware. The "firmware is not supported" branch had no `return 1`, so it
+warned and then fell straight through into the exploit with a NULL hook
+target, entered rest mode, and hard power-offed the unit. PS5Dev's
+original has the return; EchoStretch dropped it. Reproduced on a slim
+8.60 unit running that build. The audit job now fails CI if it is removed
+again.
 
-Back to -DDEBUG only, which is the last configuration known to bring the
-stub up.
+Adds include/offsets/8_60.h and 0x08600000 cases in kgadget/kdlsym/
+rawoff, fail-closed behind G_SYM/G_GADGET_MAP_0860_READY.
+
+Carries the expensive derivation work forward:
+
+  K(8.60) = 0xC70000
+
+confirmed on hardware (fw=0x08600004, derived K=0xc70000, canonical
+base) and independently matching ps5-payload-dev/sdk crt/kernel.c
+case 0x08600000. The SDK table and kstuff-lite agree exactly on all four
+branches they share, which is what validates the anchors.
+
+Conversion ktext_offset = K + signed_kdata_offset reproduces all three
+hardware-validated 11.60 symbols exactly, giving IDT_ARRAY 0x3B23DF0,
+COMMON_TSS 0x3B26AD0 and PMAP_STORE 0x3AB8848 for 8.60.
+
+Still missing: 4 data symbols, 5 text symbols, 15 of 21 gadgets. These
+have no public 8.60 source and need a kernel text dump. The payload
+therefore still refuses to run on 8.60.
+
+Removes the old custom probe payloads that caused console shutdowns; the
+port tooling and docs remain.
