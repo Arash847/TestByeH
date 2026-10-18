@@ -25,6 +25,28 @@ endif
 
 ELF := byepervisor_reborn.elf
 
+# 8.60 kernel .text dumper. Resumable: writes to /data and records a
+# checkpoint after every chunk, so a power cycle costs at most one chunk.
+#
+#   make dump860          conservative: 4KB chunks, 24 reads per run
+#   make dump860 FAST=1   faster:       16KB chunks, 96 reads per run
+#
+# Start with the conservative build for the first run.
+DUMP_0860_ELF := byepervisor_dump_0860.elf
+
+ifeq ($(FAST),1)
+DUMP_FLAGS := -DDUMP_CHUNK=0x4000 -DDUMP_DELAY_US=150000 -DDUMP_MAX_READS=96
+DUMP_0860_ELF := byepervisor_dump_0860_fast.elf
+else
+DUMP_FLAGS := -DDUMP_CHUNK=0x1000 -DDUMP_DELAY_US=200000 -DDUMP_MAX_READS=24
+DUMP_0860_ELF := byepervisor_dump_0860.elf
+endif
+
+$(DUMP_0860_ELF): dump860.c util.c
+	$(CC) $(CFLAGS) $(DUMP_FLAGS) -o $@ $(filter %.c,$^)
+
+dump860: $(DUMP_0860_ELF)
+
 PAYLOAD_DIR := break_hv_payload
 PAYLOAD_HDR := $(PAYLOAD_DIR)/break_hv.h
 

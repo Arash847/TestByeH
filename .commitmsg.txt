@@ -1,9 +1,26 @@
-Fix missing offset header includes in kdlsym.c
+Add a resumable 8.60 kernel .text dumper
 
-kdlsym.c referenced g_sym_map_1200/1202/1220/1240/1260/1270 and
-g_gadget_map_1340/1342 but only included offsets/13_00.h, 13_20.h and
-13_60.h, so those identifiers were undeclared and the tree failed to
-compile with "use of undeclared identifier". The 12.xx support commit
-added the table files and the switch cases but not the includes.
+Custom kernel reads on this console have already proven workable: a paced
+scan read successfully past kdata+0x2885d50. What caused shutdowns was
+issuing reads back to back with no checkpoint. This payload is built
+around that observation rather than around the idea of one clean run:
 
-Include every table that is referenced.
+ - every chunk is written to /data and fsync'd BEFORE the next read, so
+   the file on disk is always a valid prefix
+ - a resume offset is recorded after each chunk, so a power cycle costs
+   at most one chunk rather than the whole run
+ - reads are paced with a settle delay, matching the only pattern
+   observed to survive
+ - each run performs a bounded number of reads and then exits cleanly
+
+kernel_copyout is called directly rather than through util.c kread, which
+still discards its return value upstream, so a failed read is detected
+and leaves the resume offset unchanged instead of silently writing
+garbage.
+
+Files on console: /data/bye860_ktext.bin and /data/bye860_resume.txt.
+Delete both to restart from zero.
+
+Two variants: conservative 4KB chunks / 24 reads per run, and a fast
+16KB / 96-read build. They emit distinct filenames so CI can ship both.
+Start with the conservative one.

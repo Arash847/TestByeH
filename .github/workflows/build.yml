@@ -30,12 +30,21 @@ jobs:
       - name: Build payloads
         run: make all
 
+      - name: Build 8.60 dumper (conservative)
+        run: make dump860
+
+      - name: Build 8.60 dumper (fast variant)
+        run: make dump860 FAST=1
+
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: byepervisor-payloads
           if-no-files-found: warn
-          path: byepervisor_reborn.elf
+          path: |
+            byepervisor_reborn.elf
+            byepervisor_dump_0860.elf
+            byepervisor_dump_0860_fast.elf
 
   audit:
     name: Safety audit
