@@ -163,7 +163,7 @@ int main(void)
   static uint8_t buf[DUMP_CHUNK];
   uint64_t done, vaddr, want, phys, limit, proc, vmspace, pmap;
   uint64_t pm_pml4, pm_cr3, dmap, pml;
-  size_t   chunk, rc;
+  size_t   rc;
   int      n = 0;
 
   printf("[dump] alive. dmap-mode, chunk=0x%x delay=%dus max=%d\n",
