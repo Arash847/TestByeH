@@ -98,18 +98,16 @@ static void diag(const char *fmt, ...)
   }
 }
 
-static uint64_t hex2ull(const char *s)
-
-/* SDK values for the 8.x branch. */
+/* SDK values for the 8.x branch (crt/kernel.c, case 0x08600000). */
 #define OFF_PROC_P_VMSPACE   0x200
 #define OFF_VMSPACE_VM_PMAP  0x2E8
 #define PMAP_PML4_OFF        0x20
 #define PMAP_CR3_OFF         0x28
 
 /* Not declared in the SDK's public ps5/kernel.h, but it is a global in
- * the SDK runtime that __kernel_init() fills in via kernel_find_dmap_base()
- * using the correct walk. Declare it so we can link against the same
- * value rather than re-deriving it. */
+ * the SDK runtime that __kernel_init() fills in via
+ * kernel_find_dmap_base() using the correct walk. Declare it so we link
+ * against that value instead of re-deriving it. */
 extern const intptr_t KERNEL_ADDRESS_DMAP_BASE;
 
 #define PG_FRAME 0x000FFFFFFFFFF000ULL

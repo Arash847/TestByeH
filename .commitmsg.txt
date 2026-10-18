@@ -1,18 +1,1 @@
-Probe every plausible page-table root and mirror diagnostics to /data
-
-The console reported "page walk failed" after dmap itself validated, which
-points at the root PML4 rather than the direct map. Guessing one root per
-console run is expensive, so this tries all plausible candidates in a
-single run and reports which translates kernel text:
-
-  pm_cr3     proc 0 root from pmap
-  pml4u      the recursive index we read alongside it
-  phys0      physical 0
-  proc1_cr3  a second process root as a control
-
-One run now yields the answer instead of one run per hypothesis.
-
-Diagnostics are mirrored to /data/bye860_diag.txt as well as stdout. The
-loader only relays stdout to whatever is connected, and the NetCat GUI
-being used does not display it, so every round so far was decided by a
-roughly 40-character notification. The log removes that ceiling.
+Restore constants dropped while removing a duplicated hex2ull signature
