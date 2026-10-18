@@ -71,6 +71,12 @@
 #define PMAP_PML4_OFF        0x20
 #define PMAP_CR3_OFF         0x28
 
+/* Not declared in the SDK's public ps5/kernel.h, but it is a global in
+ * the SDK runtime that __kernel_init() fills in via kernel_find_dmap_base()
+ * using the correct walk. Declare it so we can link against the same
+ * value rather than re-deriving it. */
+extern const intptr_t KERNEL_ADDRESS_DMAP_BASE;
+
 #define PG_FRAME 0x000FFFFFFFFFF000ULL
 #define X86_PG_V 0x001ULL
 #define X86_PG_PS 0x080ULL
@@ -202,14 +208,19 @@ int main(void)
 
   /* Prefer the SDK's value, which __kernel_init() already derived with
    * the correct walk, and keep ours as a cross-check. */
-  dmap = (uint64_t)KERNEL_ADDRESS_DMAP_BASE;
+  dmap = (uint64_t)(uintptr_t)KERNEL_ADDRESS_DMAP_BASE;
   pml  = pm_cr3;
+
+  if (!dmap) {
+    printf("[dump] SDK dmap is 0; falling back to pml4 - cr3\n");
+    dmap = pm_pml4 - pm_cr3;
+  }
 
   printf("[dump] pm_pml4      = 0x%lx\n", (unsigned long)pm_pml4);
   printf("[dump] pm_cr3       = 0x%lx\n", (unsigned long)pm_cr3);
   printf("[dump] pml4 - cr3   = 0x%lx (computed)\n",
          (unsigned long)(pm_pml4 - pm_cr3));
-  printf("[dump] dmap (SDK)   = 0x%lx\n", (unsigned long)dmap);
+  printf("[dump] dmap         = 0x%lx\n", (unsigned long)dmap);
   fflush(stdout);
 
   if (dmap != (pm_pml4 - pm_cr3)) {

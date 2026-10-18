@@ -1,17 +1,7 @@
-Use the SDK dmap and stop dereferencing VM_PMAP as a pointer
+Declare KERNEL_ADDRESS_DMAP_BASE ourselves
 
-Console reported dmap=0x4140b0074fe800, which is non-canonical garbage.
-
-The pmap struct is EMBEDDED at vmspace + VM_PMAP. The SDK reads
-vmspace + VM_PMAP + 0x20 and + 0x28 directly in kernel_find_dmap_base();
-this payload read a pointer stored at vmspace + VM_PMAP and dereferenced
-that instead, which is why the result was nonsense.
-
-Now takes dmap from KERNEL_ADDRESS_DMAP_BASE, which __kernel_init already
-derives with the correct walk, and keeps the hand-computed value purely as
-a cross-check. If the two disagree the payload says so, because a
-mismatch would mean VM_PMAP is not 0x2e8 on this build.
-
-Still validates dmap is canonical and still walks and checks the first
-page before opening any file, so a bad derivation cannot truncate the
-dump.
+It is not in the SDK public ps5/kernel.h but is a global in the SDK
+runtime that __kernel_init fills in via kernel_find_dmap_base(), so
+declaring it lets us link against the same value __kernel_init computed
+instead of re-deriving it. Falls back to the hand-computed pml4 - cr3 if
+it is zero.
