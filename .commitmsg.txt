@@ -1,25 +1,5 @@
-Descend through the page directory properly instead of reading the PT
+Rename the PDPT entry variable to pdpe for clarity
 
-The console found a page with content, but two tells showed it was not
-kernel text:
-
-    PDE[81] -> phys 0x231a2051
-    first 32 bytes: e1 00 01 00 00 00 80 21 f1 00 01 00 00 00 80 21 ...
-
-0x231a2051 is not page aligned, and the content is an 8-byte repeating
-array, which is a page table's entry list. So the "kernel page" was
-actually a page table read as if it were a leaf.
-
-This is the same class of mistake as the previous two versions, at the
-remaining level: PS was handled at PDPT and for 2MB pages, but a PD entry
-with PS clear is a POINTER to a page table and was still being treated as
-a leaf. All three levels are now explicit:
-
-  PDPT[i]  PS set  -> 1GB page, entry is the leaf
-           PS clear-> pointer to a PD, open it
-  PD[j]    PS set  -> 2MB page, entry is the leaf
-           PS clear-> pointer to a PT, open it
-  PT[k]    present -> 4KB page, entry is the leaf
-
-The header comment records the diagnostic signature of this failure, since
-a non page-aligned "physical" address is the quick way to catch it.
+The outer loop read the PDPT entry into a variable named pde while the
+inner block, after the three-level fix, referred to pdpe. Renaming the
+outer one makes each level's entry name distinct.

@@ -138,15 +138,15 @@ int main(void)
   }
 
   for (i = 0; i < 512 && !found; i++) {
-    uint64_t pde;
+    uint64_t pdpe;   /* PDPT entry */
 
-    memcpy(&pde, &pd[i * 8], sizeof pde);
-    if (!(pde & 1ULL))
+    memcpy(&pdpe, &pd[i * 8], sizeof pdpe);
+    if (!(pdpe & 1ULL))
       continue;
 
     /* A 1GB page at PDPT level is itself a leaf. */
-    if (pde & 0x80ULL) {
-      leaf = (pde & (((1ULL << 52) - (1ULL << 30)))) | ((uint64_t)i << 30);
+    if (pdpe & 0x80ULL) {
+      leaf = (pdpe & (((1ULL << 52) - (1ULL << 30)))) | ((uint64_t)i << 30);
       diag("[ktext] PDPT[%d] is a 1GB page -> phys 0x%lx\n",
            i, (unsigned long)leaf);
       found = 1;
