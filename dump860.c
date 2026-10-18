@@ -1,30 +1,44 @@
-/* 8.60 kernel .text dumper -- resumable and paced.
+/* 8.60 kernel .text dumper -- reads through the physical direct map.
  *
- * WHY THIS SHAPE
- * --------------
- * Custom kernel reads on this console have already proven workable: a
- * paced scan read successfully past kdata+0x2885d50. What killed the
- * console was issuing reads back to back with no checkpoint. So this
- * payload assumes it will be interrupted and is built to survive that:
+ * WHY THE DIRECT MAP
+ * ------------------
+ * The first build read KTEXT_BASE directly and failed immediately:
  *
- *   - every chunk is written to console storage and fsync'd BEFORE the
- *     next read begins, so the file on disk is always a valid prefix
- *   - a resume offset is stored after each chunk, so a power cycle costs
- *     at most one chunk
- *   - reads are paced with a settle delay, matching the only pattern
- *     observed to survive
- *   - each run does a bounded number of reads and then exits cleanly, so
- *     the payload is never resident long enough to destabilise anything
+ *     copyout failed at 0x0 -- resume there
  *
- * Re-run after each power cycle; it picks up where it left off.
+ * That is the very first read, and it is the whole answer. Every earlier
+ * read that succeeded on this console was in the DATA segment (kdata +
+ * 0x2885d50 and up); kernel TEXT was never successfully read. 8.60
+ * enforces XOM: kernel .text is execute-only through its normal virtual
+ * mapping. That is not an obstacle to work around -- it is precisely why
+ * Byepervisor exists, since defeating XOM is what clearing NP_ENABLE
+ * across the hypervisor VMCBs achieves.
  *
- * READ-ONLY with respect to the kernel. The only writes are to files
- * under /data.
+ * But XOM guards the virtual mapping, not physical memory. kstuff-lite
+ * reads and writes kernel code through the direct map for exactly this
+ * reason, walking the page tables and then accessing the physical address
+ * via the physmap:
  *
- * Compilation knobs (see the Makefile):
- *   DUMP_CHUNK     bytes per kernel read   (default 0x1000)
- *   DUMP_DELAY_US  settle before each read (default 200000 = 200ms)
- *   DUMP_MAX_READS reads per run           (default 24)
+ *     pmap = vmspace->vm_pmap
+ *     dmap = pmap->pm_pml4 - pmap->pm_cr3      // phys 0 maps here
+ *     pml  = pmap->pm_cr3                       // root PML4, physical
+ *     phys = virt2phys(vaddr, dmap, pml)
+ *     read via kernel_copyout(dmap + phys, ...)
+ *
+ * The page walk only reads PTE bytes out of page-table pages, which are
+ * ordinary data pages and are not XOM protected, so it works even though
+ * the target mapping is execute-only.
+ *
+ * Struct offsets below are the SDK's values for the 8.x branch
+ * (crt/kernel.c, case 0x08600000), which is where 8.60 lands:
+ *   KERNEL_OFFSET_PROC_P_VMSPACE = 0x200
+ *   KERNEL_OFFSET_VMSPACE_VM_PMAP = 0x2e8
+ *
+ * STILL READ-ONLY with respect to the kernel: the only writes this
+ * payload performs are to files under /data.
+ *
+ * Resumable and paced. See the file-writing section for the checkpoint
+ * behaviour; a power cycle costs at most one chunk.
  */
 
 #include <sys/types.h>
@@ -50,6 +64,16 @@
 
 #define OUT_PATH    "/data/bye860_ktext.bin"
 #define RESUME_PATH "/data/bye860_resume.txt"
+
+/* SDK values for the 8.x branch. */
+#define OFF_PROC_P_VMSPACE   0x200
+#define OFF_VMSPACE_VM_PMAP  0x2E8
+#define PMAP_PML4_OFF        0x20
+#define PMAP_CR3_OFF         0x28
+
+#define PG_FRAME 0x000FFFFFFFFFF000ULL
+#define X86_PG_V 0x001ULL
+#define X86_PG_PS 0x080ULL
 
 static uint64_t hex2ull(const char *s)
 {
@@ -83,104 +107,200 @@ static uint64_t load_resume(void)
   fclose(f);
 
   v = hex2ull(buf);
-  if (v > KTEXT_SIZE) {
-    printf("[dump] resume offset 0x%lx is past the end; starting over\n",
-           (unsigned long)v);
+  if (v > KTEXT_SIZE)
     return 0;
-  }
   return v;
 }
 
 static void save_resume(uint64_t off)
 {
   FILE *f = fopen(RESUME_PATH, "w");
-  if (!f) {
-    printf("[dump] WARNING: cannot write %s\n", RESUME_PATH);
+  if (!f)
     return;
-  }
   fprintf(f, "%llx\n", (unsigned long long)off);
   fflush(f);
   fclose(f);
 }
 
+/* Walk the page tables to translate a kernel virtual address to physical.
+ * Mirrors ps5-kstuff's virt2phys. Returns (uint64_t)-1 on a missing
+ * entry. On success phys_limit, when non-NULL, receives the first address
+ * beyond the mapping so a chunk can be clamped to it. */
+static uint64_t virt2phys(uint64_t addr, uint64_t *phys_limit,
+                          uint64_t dmap, uint64_t pml)
+{
+  int i;
+
+  pml &= PG_FRAME;
+
+  for (i = 39; i >= 12; i -= 9) {
+    uint64_t index    = (addr >> i) & 0x1FFULL;
+    uint64_t offseta  = index * sizeof(uint64_t);
+    uint64_t entry;
+
+    if (kernel_copyout(dmap + pml + offseta, &entry, sizeof entry) != 0)
+      return (uint64_t)-1;
+
+    pml = entry;
+    if (!(pml & X86_PG_V))
+      return (uint64_t)-1;
+
+    if ((pml & X86_PG_PS) || i == 12) {
+      pml &= (1ULL << 52) - (1ULL << i);
+      pml |= addr & ((1ULL << i) - 1);
+      if (phys_limit)
+        *phys_limit = (pml | ((1ULL << i) - 1)) + 1;
+      return pml;
+    }
+    pml &= PG_FRAME;
+  }
+
+  return (uint64_t)-1;
+}
+
 int main(void)
 {
   static uint8_t buf[DUMP_CHUNK];
-  uint64_t done, addr, total;
-  size_t   want;
-  int      n = 0, rc;
+  uint64_t done, vaddr, want, phys, limit, proc, vmspace, pmap;
+  uint64_t pm_pml4, pm_cr3, dmap, pml;
+  size_t   chunk, rc;
+  int      n = 0;
 
-  printf("[dump] alive. chunk=0x%x delay=%dus max_reads=%d\n",
+  printf("[dump] alive. dmap-mode, chunk=0x%x delay=%dus max=%d\n",
          (unsigned int)DUMP_CHUNK, (int)DUMP_DELAY_US, (int)DUMP_MAX_READS);
-  printf("[dump] target ktext 0x%lx .. 0x%lx (%llu bytes)\n",
-         (unsigned long)KTEXT_BASE, (unsigned long)(KTEXT_BASE + KTEXT_SIZE),
-         (unsigned long long)KTEXT_SIZE);
   fflush(stdout);
 
+  /* Discover the direct map. proc 0's pmap carries the kernel's own root
+   * table and the recursive index, which together define phys 0. */
+  proc = kernel_get_proc(0);
+  printf("[dump] proc(0)      = 0x%lx\n", (unsigned long)proc);
+  if (!proc) {
+    printf("[dump] cannot resolve proc 0\n");
+    fflush(stdout);
+    return 1;
+  }
+
+  if (kernel_copyout(proc + OFF_PROC_P_VMSPACE, &vmspace, sizeof vmspace)) {
+    printf("[dump] cannot read vmspace\n");
+    fflush(stdout);
+    return 1;
+  }
+  if (kernel_copyout(vmspace + OFF_VMSPACE_VM_PMAP, &pmap, sizeof pmap)) {
+    printf("[dump] cannot read vm_pmap\n");
+    fflush(stdout);
+    return 1;
+  }
+  if (kernel_copyout(pmap + PMAP_PML4_OFF, &pm_pml4, sizeof pm_pml4) ||
+      kernel_copyout(pmap + PMAP_CR3_OFF, &pm_cr3, sizeof pm_cr3)) {
+    printf("[dump] cannot read pmap root pointers\n");
+    fflush(stdout);
+    return 1;
+  }
+
+  dmap = pm_pml4 - pm_cr3;
+  pml  = pm_cr3;
+
+  printf("[dump] pm_pml4      = 0x%lx\n", (unsigned long)pm_pml4);
+  printf("[dump] pm_cr3       = 0x%lx\n", (unsigned long)pm_cr3);
+  printf("[dump] dmap         = 0x%lx\n", (unsigned long)dmap);
+  fflush(stdout);
+
+  if (!dmap || (dmap >> 48) != 0xFFFFULL) {
+    printf("[dump] dmap is not a plausible canonical address; aborting\n");
+    fflush(stdout);
+    notifyf("[8.60 dump] FAILED\ndmap=0x%lx implausible", (unsigned long)dmap);
+    return 1;
+  }
+
+  /* Sanity-check the walk on the first page of kernel text before
+   * writing anything. */
+  phys  = virt2phys(KTEXT_BASE, &limit, dmap, pml);
+  printf("[dump] ktext[0] -> phys 0x%lx (mapping ends 0x%lx)\n",
+         (unsigned long)phys, (unsigned long)limit);
+  fflush(stdout);
+
+  if (phys == (uint64_t)-1) {
+    printf("[dump] page walk failed for ktext base; aborting before any write\n");
+    fflush(stdout);
+    notifyf("[8.60 dump] FAILED\npage walk failed\nno file written");
+    return 1;
+  }
+
   done = load_resume();
-  printf("[dump] resuming at offset 0x%llx (%.2f%% done)\n",
-         (unsigned long long)done, 100.0 * (double)done / (double)KTEXT_SIZE);
+  printf("[dump] resuming at 0x%llx (%.2f%%)\n", (unsigned long long)done,
+         100.0 * (double)done / (double)KTEXT_SIZE);
   fflush(stdout);
 
   if (done >= KTEXT_SIZE) {
-    printf("[dump] already complete. Nothing to do.\n");
+    printf("[dump] already complete\n");
     fflush(stdout);
-    notifyf("[8.60 dump]\ncomplete\n%llu bytes in /data", (unsigned long long)KTEXT_SIZE);
+    notifyf("[8.60 dump]\ncomplete");
     return 0;
   }
 
-  /* "r+b" keeps prior contents and seeks to the resume point; "wb" starts
-   * fresh. Either way the file is only ever extended, never truncated
-   * mid-run, so a power-off leaves a valid prefix. */
   {
     FILE *out = fopen(OUT_PATH, done ? "r+b" : "wb");
     if (!out) {
-      printf("[dump] cannot open %s for writing\n", OUT_PATH);
+      printf("[dump] cannot open %s\n", OUT_PATH);
       fflush(stdout);
-      notifyf("[8.60 dump] FAILED\ncannot write %s", OUT_PATH);
       return 1;
     }
-
     if (done && fseek(out, (long)done, SEEK_SET) != 0) {
-      printf("[dump] cannot seek to 0x%llx; file may be shorter than the "
-             "resume record. Delete %s and %s to restart.\n",
+      printf("[dump] cannot seek to 0x%llx; delete %s and %s to restart\n",
              (unsigned long long)done, OUT_PATH, RESUME_PATH);
       fclose(out);
       return 1;
     }
 
     while (done < KTEXT_SIZE && n < DUMP_MAX_READS) {
-      want = (size_t)((KTEXT_SIZE - done) < (uint64_t)DUMP_CHUNK
-                      ? (KTEXT_SIZE - done) : (uint64_t)DUMP_CHUNK);
-      addr = KTEXT_BASE + done;
+      vaddr = KTEXT_BASE + done;
+      want  = KTEXT_SIZE - done;
+      if (want > (uint64_t)DUMP_CHUNK)
+        want = (uint64_t)DUMP_CHUNK;
 
-      /* Settle before the read. This is the one behaviour that has been
-       * observed to keep repeated kernel reads stable. */
       usleep(DUMP_DELAY_US);
 
-      rc = (int)kernel_copyout(addr, buf, want);
-      if (rc != 0) {
-        printf("[dump] copyout FAILED rc=%d at offset 0x%llx (addr 0x%lx); "
-               "resume offset unchanged\n",
-               rc, (unsigned long long)done, (unsigned long)addr);
+      limit = 0;
+      phys  = virt2phys(vaddr, &limit, dmap, pml);
+      if (phys == (uint64_t)-1) {
+        printf("[dump] unmapped at offset 0x%llx (vaddr 0x%lx); stopping\n",
+               (unsigned long long)done, (unsigned long)vaddr);
         fflush(out);
         fclose(out);
         save_resume(done);
-        notifyf("[8.60 dump] copyout failed\nat 0x%llx -- resume there",
-                (unsigned long long)done);
+        notifyf("[8.60 dump] unmapped\nat offset 0x%llx", (unsigned long long)done);
         return 2;
       }
 
-      if (fwrite(buf, 1, want, out) != want) {
-        printf("[dump] short write at offset 0x%llx\n", (unsigned long long)done);
+      /* Never read past the end of the mapping that backs this chunk. */
+      if (limit && (phys + want) > limit)
+        want = limit - phys;
+      if (!want) {
+        printf("[dump] zero-length mapping at 0x%llx\n", (unsigned long long)done);
+        fclose(out);
+        save_resume(done);
+        return 2;
+      }
+
+      rc = (size_t)kernel_copyout(dmap + phys, buf, (size_t)want);
+      if (rc != want) {
+        printf("[dump] copyout failed at offset 0x%llx (phys 0x%lx, rc %zu)\n",
+               (unsigned long long)done, (unsigned long)phys, rc);
         fflush(out);
         fclose(out);
         save_resume(done);
+        notifyf("[8.60 dump] copyout failed\nat 0x%llx", (unsigned long long)done);
         return 3;
       }
 
-      /* Durable BEFORE the next read, so an abrupt power-off cannot lose
-       * a chunk that we already counted. */
+      if (fwrite(buf, 1, want, out) != want) {
+        printf("[dump] short write at 0x%llx\n", (unsigned long long)done);
+        fflush(out);
+        fclose(out);
+        save_resume(done);
+        return 4;
+      }
+
       fflush(out);
       fsync(fileno(out));
 
@@ -188,10 +308,9 @@ int main(void)
       save_resume(done);
       n++;
 
-      total = done;
-      printf("[dump] +%zu -> 0x%llx  (%.2f%%)\n", want,
-             (unsigned long long)total,
-             100.0 * (double)total / (double)KTEXT_SIZE);
+      printf("[dump] +%llu -> 0x%llx (%.2f%%)\n",
+             (unsigned long long)want, (unsigned long long)done,
+             100.0 * (double)done / (double)KTEXT_SIZE);
       fflush(stdout);
     }
 
@@ -199,21 +318,18 @@ int main(void)
     fclose(out);
   }
 
-  printf("[dump] run finished: %d reads this run, offset 0x%llx\n",
-         n, (unsigned long long)done);
   if (done >= KTEXT_SIZE) {
     printf("[dump] COMPLETE: %llu bytes in %s\n",
            (unsigned long long)KTEXT_SIZE, OUT_PATH);
     fflush(stdout);
-    notifyf("[8.60 dump] COMPLETE\n%llu bytes -> bye860_ktext.bin",
-            (unsigned long long)KTEXT_SIZE);
+    notifyf("[8.60 dump] COMPLETE\n%llu bytes", (unsigned long long)KTEXT_SIZE);
     return 0;
   }
 
-  printf("[dump] incomplete. Power-cycle and re-run to resume from 0x%llx.\n",
-         (unsigned long long)done);
+  printf("[dump] %d reads this run, at 0x%llx. Rerun to resume.\n",
+         n, (unsigned long long)done);
   fflush(stdout);
-  notifyf("[8.60 dump] %d reads done\n%.1f%% -- rerun to resume",
-          n, 100.0 * (double)done / (double)KTEXT_SIZE);
+  notifyf("[8.60 dump] %.1f%%\nrerun to resume",
+          100.0 * (double)done / (double)KTEXT_SIZE);
   return 0;
 }

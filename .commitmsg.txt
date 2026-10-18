@@ -1,12 +1,37 @@
-Fix make implicit-rule collision on the dump860 target
+Read kernel text through the direct map: 8.60 enforces XOM
 
-Target `dump860` was matching make's builtin "%: %.c" rule against
-dump860.c, so after the real build succeeded make ran a second, bogus
-compile that tried to link the source with the already-built ELF:
+The first dumper failed on its very first read, which answered a question
+we had never actually tested:
 
-  prospero-clang ... dump860.c byepervisor_dump_0860.elf -o dump860
-  ld.lld: error: undefined symbol: notifyf
+    copyout failed at 0x0 -- resume there
 
-That "undefined symbol" came from make building the wrong target, not
-from the payload. Declaring the targets phony stops the implicit rule
-from applying.
+Every read that had previously succeeded on this console was in the DATA
+segment (kdata+0x2885d50 onward). Kernel TEXT was never successfully
+read. 8.60 enforces XOM, so .text is execute-only through its normal
+virtual mapping. That is the entire reason Byepervisor exists -- defeating
+XOM is what clearing NP_ENABLE across the hypervisor VMCBs achieves. The
+earlier assumption that 8.60 predates enforced XOM was wrong.
+
+XOM guards the virtual mapping, not physical memory. kstuff-lite reads
+kernel code through the direct map for exactly this reason, so this build
+now does the same:
+
+    pmap  = vmspace->vm_pmap
+    dmap  = pmap->pm_pml4 - pmap->pm_cr3
+    pml   = pmap->pm_cr3
+    phys  = virt2phys(vaddr, dmap, pml)
+    read  via kernel_copyout(dmap + phys, ...)
+
+The walk only reads PTE bytes from page-table pages, which are ordinary
+data pages and not XOM protected, so it succeeds even though the target
+mapping is execute-only.
+
+Offsets are the SDK's 8.x branch values (crt/kernel.c case 0x08600000):
+KERNEL_OFFSET_PROC_P_VMSPACE = 0x200, VM_PMAP = 0x2e8.
+
+Also hardens the writer: the chunk is clamped to phys_limit so a read can
+never cross the end of the mapping, and the first page is walked and
+validated before any file is opened, so a bad walk fails without leaving
+a truncated dump behind.
+
+Still read-only with respect to the kernel, still resumable and paced.
