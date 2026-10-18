@@ -1,25 +1,14 @@
-Add a kernel-text locator built on the census result
+Scan page tables for the first mapped page instead of probing index 0
 
-The level census established the real kernel mapping. PML4E[511] is the
-kernelmap slot and its live PDPT indices are 0,1,2,3 and 511. Restoring
-the canonical high half that the census printout dropped:
+The walk itself is correct: it reaches three levels with rc=0 every time,
+and lvl1/lvl2 entries are properly present (0x...63). Only lvl3 came back
+zero. The cause was in the probe, not the console: it tested page index 0
+of each table, and every 2MB region probed has page 0 unmapped. That says
+nothing about the rest of the region, and kernel text does not begin at a
+2MB boundary plus zero.
 
-    slot 511 sub   0 -> 0xFFFFFF8000000000   <- kernelmap base
-    slot 511 sub   1 -> 0xFFFFFF8040000000
-    slot 511 sub   2 -> 0xFFFFFF8080000000
-    slot 511 sub   3 -> 0xFFFFFF80C0000000
-    slot 511 sub 511 -> recursive window
+This now reads each level as a whole 4KB table and finds the lowest
+present entry, reporting the virtual address and the physical address,
+then reads 64 bytes from it.
 
-KERNEL_ADDRESS_TEXT_BASE, 0xFFFFFFFF81000000, resolves to PML4 index 511
-and PDPT index 510 -- and PDPTE[510] is zero. The SDK base is not mapped on
-this firmware, which is why every dump range so far pointed at nothing.
-
-That also settles what the physmap is for: XOM guards the virtual mapping
-of .text, but a whole 4KB PML4 came back through dmap with rc=0, so
-physical access is not blocked. Walking to a physical address and reading
-via the physmap is the way in.
-
-This walks from the real kernelmap base, stepping forward in 2MB if the
-first address is a hole, and reads 64 bytes at the first mapped physical
-address. Those bytes are the answer to whether kernel text can be dumped
-on 8.60 at all.
+Reads remain few: one PDPT, one PT per populated PDE, then the probe.

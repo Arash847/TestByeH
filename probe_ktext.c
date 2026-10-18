@@ -146,26 +146,65 @@ int main(void)
          (unsigned long long)e511, (unsigned long)km_phys);
   }
 
-  diag("[ktext] --- walk from kernelmap base 0x%lx ---\n",
-       (unsigned long)KERNELMAP_BASE);
-  leaf = walk(KERNELMAP_BASE, dmap, pm_cr3, 1);
+  /* Scanning beats probing one index.
+   *
+   * The walk reaches three levels cleanly; PT[0] is simply a hole. Every
+   * 2MB region probed had page index 0 unmapped, which says nothing about
+   * the rest of the region -- kernel text does not begin at a 2MB
+   * boundary plus zero. So read each level as a whole table (one 4KB
+   * read) and find the lowest PRESENT entry, then read what is there. */
+  diag("[ktext] --- scanning kernelmap for the first mapped page ---\n");
+  {
+    static uint8_t pd[4096], pt[4096];
+    int i, found = 0;
 
-  if (leaf == (uint64_t)-1) {
-    /* The very first address may be a hole before text begins. Step
-     * forward by 2MB and try a handful, which is where a kernel image
-     * typically starts after alignment. */
-    diag("[ktext] base not mapped; probing forward\n");
-    for (i = 1; i <= 8 && leaf == (uint64_t)-1; i++) {
-      cand = KERNELMAP_BASE + (uint64_t)i * 0x200000ULL;
-      diag("[ktext] probe 0x%lx\n", (unsigned long)cand);
-      leaf = walk(cand, dmap, pm_cr3, 1);
+    if (kernel_copyout(dmap + km_phys, pd, sizeof pd) != 0) {
+      diag("[ktext] cannot read PDPT at 0x%lx\n", (unsigned long)km_phys);
+      return 2;
     }
-  }
 
-  if (leaf == (uint64_t)-1) {
-    diag("[ktext] nothing mapped near kernelmap base\n");
-    notifyf("[ktext] nothing mapped\nnear 0xFFFFFF8000000000");
-    return 2;
+    for (i = 0; i < 512 && !found; i++) {
+      uint64_t pde;
+      memcpy(&pde, &pd[i * 8], sizeof pde);
+      if (!(pde & 1ULL))
+        continue;
+
+      if (pde & 0x80ULL) {
+        leaf = (pde & (((1ULL << 52) - (1ULL << 21)))) | ((uint64_t)i << 21);
+        diag("[ktext] PDPT[%d] is a 2MB page -> phys 0x%lx\n",
+             i, (unsigned long)leaf);
+        found = 1;
+        break;
+      }
+
+      {
+        uint64_t pt_phys = pde & 0x000FFFFFFFFFF000ULL;
+        int j;
+        if (kernel_copyout(dmap + pt_phys, pt, sizeof pt) != 0)
+          continue;
+        for (j = 0; j < 512; j++) {
+          uint64_t pte;
+          memcpy(&pte, &pt[j * 8], sizeof pte);
+          if (!(pte & 1ULL))
+            continue;
+          leaf = (pte & 0x000FFFFFFFFFF000ULL) | (uint64_t)j;
+          diag("[ktext] PDPT[%d] -> PT 0x%lx, first present PTE[%d]\n",
+               i, (unsigned long)pt_phys, j);
+          diag("[ktext]   VA   = 0x%lx\n",
+               (unsigned long)(KERNELMAP_BASE + ((uint64_t)i << 30) +
+                               ((uint64_t)j << 12)));
+          diag("[ktext]   phys = 0x%lx\n", (unsigned long)leaf);
+          found = 1;
+          break;
+        }
+      }
+    }
+
+    if (!found) {
+      diag("[ktext] no present leaf in the first 1GB of kernelmap\n");
+      notifyf("[ktext] no mapped page\nin first 1GB of kernelmap");
+      return 2;
+    }
   }
 
   diag("[ktext] FIRST MAPPED physical = 0x%lx\n", (unsigned long)leaf);
