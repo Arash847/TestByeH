@@ -4,9 +4,21 @@
 #include "util.h"
 #include "kdlsym.h"
 
+/* Upstream referenced the 12.xx and 13.40/13.42 tables but only included
+ * 13_00, 13_20 and 13_60, so g_sym_map_1200/_1202/_1220/_1240/_1260/
+ * _1270 and g_gadget_map_1340/_1342 were undeclared and the tree did not
+ * compile. Include every table that is actually referenced. */
 #include "offsets/8_60.h"
+#include "offsets/12_00.h"
+#include "offsets/12_02.h"
+#include "offsets/12_20.h"
+#include "offsets/12_40.h"
+#include "offsets/12_60.h"
+#include "offsets/12_70.h"
 #include "offsets/13_00.h"
 #include "offsets/13_20.h"
+#include "offsets/13_40.h"
+#include "offsets/13_42.h"
 #include "offsets/13_60.h"
 
 uint64_t g_fw_version;
